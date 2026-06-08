@@ -1,0 +1,12 @@
+{
+  "name": "learossek-app",
+  "version": "1.0.0",
+  "description": "Lea Rossek Lagree — class scheduler and membership rewards app",
+  "private": true,
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.0"
+  },
+  "engines": {
+    "node": ">=20.x"
+  }
+}

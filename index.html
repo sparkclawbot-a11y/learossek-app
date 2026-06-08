@@ -32,18 +32,48 @@
 const { useState, useRef, useEffect, useCallback } = React;
 
 // ═══════════════════════════════════════════════════════════
-// !! CONFIGURATION — fill in your Supabase project details !!
-// Get these from: Supabase Dashboard → Project Settings → API
+// CONFIGURATION
+// Supabase anon key is safe to expose in client code (it's a
+// "publishable" key — RLS policies enforce data access).
+// Admin password + service_role key are server-side only
+// (stored in Vercel env vars, never in this file).
 // ═══════════════════════════════════════════════════════════
 const SUPABASE_URL  = 'https://qczbaafjepwypcdlndgi.supabase.co';
 const SUPABASE_ANON = 'sb_publishable_USX-QCrRa3-jCu-s_hLP7Q_wfenH-Dz';
-const ADMIN_PW      = 'lagree2026';           // change this!
 
 // ─────────────────────────────────────────────
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
 // Demo mode: if Supabase isn't configured yet, use mock data
 const DEMO_MODE = SUPABASE_URL === 'YOUR_SUPABASE_URL';
+
+// ─────────────────────────────────────────────
+// SECURITY HELPERS
+// ─────────────────────────────────────────────
+// Escape HTML to prevent XSS in any context that renders raw HTML (e.g. Leaflet popups)
+const escapeHtml = (s) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+// Proper email validation (not just includes('@'))
+const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(e||'').trim());
+
+// Phone: allow digits, spaces, +, -, (, ) — 7–20 chars
+const isValidMobile = (m) => /^[+\d\s\-() ]{7,20}$/.test(String(m||'').trim());
+
+// Strip leading/trailing whitespace and cap length
+const sanitize = (s, max = 255) => String(s||'').trim().slice(0, max);
+
+// Admin API caller — all admin operations go through /api/admin
+// which validates the password server-side and uses the service_role key
+const adminFetch = async (action, payload, password) => {
+  const res = await fetch('/api/admin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, payload: payload || {}, password }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+};
 
 // ─────────────────────────────────────────────
 // MOCK DATA (used only in demo mode)
@@ -256,7 +286,7 @@ function MapView({ lat, lng, label, address }) {
         html: `<div style="width:36px;height:36px;background:#5a7032;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3)"></div>`,
         iconSize: [36, 36], iconAnchor: [18, 36], className: ''
       });
-      L.marker([lat, lng], { icon }).addTo(map).bindPopup(`<b>${label}</b><br/>${address}`).openPopup();
+      L.marker([lat, lng], { icon }).addTo(map).bindPopup(`<b>${escapeHtml(label)}</b><br/>${escapeHtml(address)}`).openPopup();
       mapRef.current = map;
     }, 100);
     return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
@@ -295,9 +325,10 @@ function RegisterPage({ onDone, setClient }) {
   const [loading, setLoad]  = useState(false);
   const [error, setError]   = useState(null);
   const [resent, setResent] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0); // seconds remaining
 
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
-  const validForm = form.name.trim() && form.email.includes('@') && form.mobile.length >= 7;
+  const validForm = sanitize(form.name).length >= 2 && isValidEmail(form.email) && isValidMobile(form.mobile);
   const validOtp  = otp.trim().length >= 6;
 
   // Step 1: save client record + send OTP email
@@ -354,9 +385,15 @@ function RegisterPage({ onDone, setClient }) {
   };
 
   const resendOtp = async () => {
+    if (resendCooldown > 0) return;
     setResent(false);
     await sb.auth.signInWithOtp({ email: form.email.trim().toLowerCase(), options: { shouldCreateUser: false } });
     setResent(true);
+    // 60-second cooldown to prevent spam
+    setResendCooldown(60);
+    const timer = setInterval(() => {
+      setResendCooldown(c => { if (c <= 1) { clearInterval(timer); return 0; } return c - 1; });
+    }, 1000);
   };
 
   // ── DONE ──
@@ -396,10 +433,14 @@ function RegisterPage({ onDone, setClient }) {
           <label style={base.label}>Verification Code</label>
           <input
             style={{ ...base.input, fontSize: 28, fontWeight: 800, letterSpacing: 8, textAlign: 'center', color: C.olive }}
-            type='number'
+            type='text'
+            inputMode='numeric'
+            pattern='[0-9]*'
+            autoComplete='one-time-code'
             placeholder='00000000'
+            maxLength={8}
             value={otp}
-            onChange={e => { setOtp(e.target.value.slice(0,8)); setError(null); }}
+            onChange={e => { setOtp(e.target.value.replace(/\D/g,'').slice(0,8)); setError(null); }}
           />
 
           {error && <div style={{ color: '#e74c3c', fontSize: 13, marginTop: 10, textAlign: 'center' }}>{error}</div>}
@@ -414,8 +455,8 @@ function RegisterPage({ onDone, setClient }) {
         </div>
 
         <div style={{ textAlign: 'center' }}>
-          <button onClick={resendOtp} style={{ background: 'none', border: 'none', color: C.sage, fontSize: 13, cursor: 'pointer', fontFamily: 'Nunito', marginBottom: 8 }}>
-            Didn't receive it? Resend code
+          <button onClick={resendOtp} disabled={resendCooldown > 0} style={{ background: 'none', border: 'none', color: resendCooldown > 0 ? '#bbb' : C.sage, fontSize: 13, cursor: resendCooldown > 0 ? 'default' : 'pointer', fontFamily: 'Nunito', marginBottom: 8 }}>
+            {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Didn't receive it? Resend code"}
           </button>
           <br/>
           <button onClick={() => { setStep('form'); setOtp(''); setError(null); }} style={{ background: 'none', border: 'none', color: '#aaa', fontSize: 13, cursor: 'pointer', fontFamily: 'Nunito' }}>
@@ -447,9 +488,9 @@ function RegisterPage({ onDone, setClient }) {
       </div>
 
       <div style={{ margin: '16px 14px 0', display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" value={form.name} onChange={set('name')} /></div>
-        <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" value={form.email} onChange={set('email')} /></div>
-        <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" value={form.mobile} onChange={set('mobile')} /></div>
+        <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" maxLength={80} value={form.name} onChange={set('name')} /></div>
+        <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" maxLength={120} autoComplete="email" value={form.email} onChange={set('email')} /></div>
+        <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" maxLength={20} autoComplete="tel" value={form.mobile} onChange={set('mobile')} /></div>
 
         <div style={{ background: C.cream, border: `1px solid ${C.border}`, borderRadius: 10, padding: '12px 14px', fontSize: 13, color: '#444', lineHeight: 1.5, display: 'flex', gap: 8 }}>
           <Icon name='envelope' size={16} color={C.sage} style={{marginTop:1,flexShrink:0}} />
@@ -640,7 +681,7 @@ function BookingForm({ session, client, setClient, onBack, onDone }) {
   const [loading, setLoad]  = useState(false);
   const [error, setError]   = useState(null);
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
-  const valid = form.name.trim() && form.email.includes('@') && form.mobile.length >= 7;
+  const valid = sanitize(form.name).length >= 2 && isValidEmail(form.email) && isValidMobile(form.mobile);
 
   const submit = async () => {
     if (!client && !valid) return;
@@ -767,9 +808,9 @@ function BookingForm({ session, client, setClient, onBack, onDone }) {
             <Icon name='star' size={14} /><span>We'll save these so you never type them again — and start earning rewards.</span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" value={form.name} onChange={set('name')} /></div>
-            <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" value={form.email} onChange={set('email')} /></div>
-            <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" value={form.mobile} onChange={set('mobile')} /></div>
+            <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" maxLength={80} value={form.name} onChange={set('name')} /></div>
+            <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" maxLength={120} autoComplete="email" value={form.email} onChange={set('email')} /></div>
+            <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" maxLength={20} autoComplete="tel" value={form.mobile} onChange={set('mobile')} /></div>
           </div>
           {error && <div style={{ color: '#e74c3c', fontSize: 13, margin: '12px 0', textAlign: 'center' }}>{error}</div>}
           <button style={{ ...base.btn, opacity: valid ? 1 : 0.45, marginTop: 16 }} onClick={submit} disabled={!valid || loading}>
@@ -938,7 +979,7 @@ function PrivatePage({ onDone }) {
   const [loading, setLoad]  = useState(false);
   const [error, setError]   = useState(null);
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
-  const valid = form.name && form.email.includes('@') && form.mobile && form.date && form.address;
+  const valid = sanitize(form.name).length >= 2 && isValidEmail(form.email) && isValidMobile(form.mobile) && form.date && sanitize(form.address).length >= 5;
 
   const submit = async () => {
     if (!valid) return;
@@ -999,15 +1040,15 @@ function PrivatePage({ onDone }) {
       </div>
 
       <div style={{ margin: '14px 14px 0', display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" value={form.name} onChange={set('name')} /></div>
-        <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" value={form.email} onChange={set('email')} /></div>
-        <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" value={form.mobile} onChange={set('mobile')} /></div>
+        <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" maxLength={80} value={form.name} onChange={set('name')} /></div>
+        <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" maxLength={120} autoComplete="email" value={form.email} onChange={set('email')} /></div>
+        <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" maxLength={20} autoComplete="tel" value={form.mobile} onChange={set('mobile')} /></div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <div><label style={base.label}>Preferred Date</label><input style={base.input} type="date" value={form.date} onChange={set('date')} /></div>
           <div><label style={base.label}>Preferred Time</label><input style={base.input} type="time" value={form.time} onChange={set('time')} /></div>
         </div>
-        <div><label style={base.label}>Your Address / Location</label><input style={base.input} placeholder="Full address for the session" value={form.address} onChange={set('address')} /></div>
-        <div><label style={base.label}>Notes (optional)</label><textarea style={{ ...base.input, minHeight: 76, resize: 'none' }} placeholder="Any goals, injuries, or requests…" value={form.notes} onChange={set('notes')} /></div>
+        <div><label style={base.label}>Your Address / Location</label><input style={base.input} placeholder="Full address for the session" maxLength={200} value={form.address} onChange={set('address')} /></div>
+        <div><label style={base.label}>Notes (optional)</label><textarea style={{ ...base.input, minHeight: 76, resize: 'none' }} placeholder="Any goals, injuries, or requests…" maxLength={500} value={form.notes} onChange={set('notes')} /></div>
         {error && <div style={{ color: '#e74c3c', fontSize: 13, textAlign: 'center' }}>{error}</div>}
         <button style={{ ...base.btn, opacity: valid ? 1 : 0.45 }} onClick={submit} disabled={!valid || loading}>
           {loading ? 'Sending Request…' : 'Request Private Session'}
@@ -1376,6 +1417,8 @@ function SessionModal({ session, onSave, onClose }) {
       price: parseFloat(form.price),
       external_link: form.type === 'guest' ? (form.external_link.trim() || null) : null,
       coupon: form.type === 'guest' ? (form.coupon.trim() || null) : null,
+      lat: form.lat !== '' && form.lat !== undefined ? parseFloat(form.lat) || null : null,
+      lng: form.lng !== '' && form.lng !== undefined ? parseFloat(form.lng) || null : null,
     };
     await onSave(session ? session.id : null, data);
     setSave(false);
@@ -1439,7 +1482,9 @@ function AdminPanel({ onExit }) {
   const [authed, setAuthed]     = useState(false);
   const [pw, setPw]             = useState('');
   const [pwError, setPwErr]     = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
   const [tab, setTab]           = useState('bookings');
+  const [confirmDialog, setConfirmDialog] = useState(null); // { message, onConfirm }
 
   // Data
   const [bookings, setBookings] = useState([]);
@@ -1449,60 +1494,100 @@ function AdminPanel({ onExit }) {
   const [loading, setLoading]   = useState(false);
   const [editPrice, setEP]      = useState(null);
   const [modal, setModal]       = useState(null); // null | 'new' | session obj
+  const [opError, setOpError]   = useState(null); // error from admin operations
 
-  const tryLogin = () => {
-    if (pw === ADMIN_PW) { setAuthed(true); setPwErr(false); loadAll(); }
-    else setPwErr(true);
+  // All admin calls go through /api/admin — password validated server-side
+  const api = useCallback((action, payload = {}) => adminFetch(action, payload, pw), [pw]);
+
+  // Server-side password validation — pw never compared in browser JS
+  const tryLogin = async () => {
+    if (!pw.trim()) { setPwErr(true); return; }
+    setLoginLoading(true);
+    try {
+      await api('ping');
+      setAuthed(true); setPwErr(false);
+      loadAll();
+    } catch {
+      setPwErr(true);
+    }
+    setLoginLoading(false);
   };
 
   const loadAll = async () => {
-    setLoading(true);
-    const [b, s, c, p] = await Promise.all([DB.getBookings(), DB.getAllSessions(), DB.getAllClients(), DB.getPrices()]);
-    setBookings(b.data || []);
-    setSessions(s.data || []);
-    setClients(c.data || []);
-    setPrices(p.data || { studio: 35, private: 80 });
+    setLoading(true); setOpError(null);
+    try {
+      const [b, s, c, p] = await Promise.all([
+        api('getAllBookings'),
+        api('getAllSessions'),
+        api('getAllClients'),
+        DB.getPrices(),          // prices are public read, no admin needed
+      ]);
+      setBookings(b.data || []);
+      setSessions(s.data || []);
+      setClients(c.data || []);
+      setPrices(p.data || { studio: 35, private: 80 });
+    } catch (e) {
+      setOpError('Failed to load data: ' + e.message);
+    }
     setLoading(false);
   };
 
   const confirmBooking = async (id) => {
-    await DB.updateBookingStatus(id, 'confirmed');
-    setBookings(bs => bs.map(b => b.id === id ? { ...b, status: 'confirmed' } : b));
+    try {
+      await api('confirmBooking', { id });
+      setBookings(bs => bs.map(b => b.id === id ? { ...b, status: 'confirmed' } : b));
+    } catch (e) { setOpError('Confirm failed: ' + e.message); }
   };
 
   const cancelBooking = async (id) => {
-    await DB.updateBookingStatus(id, 'cancelled');
-    setBookings(bs => bs.filter(b => b.id !== id));
+    try {
+      await api('cancelBooking', { id });
+      // Show as cancelled in the list rather than removing it
+      setBookings(bs => bs.map(b => b.id === id ? { ...b, status: 'cancelled' } : b));
+    } catch (e) { setOpError('Cancel failed: ' + e.message); }
   };
 
   const savePrice = async (key, amount) => {
-    await DB.updatePrice(key, parseFloat(amount));
-    setEP(null);
+    try {
+      await api('updatePrice', { key, amount: parseFloat(amount) });
+      setEP(null);
+    } catch (e) { setOpError('Price update failed: ' + e.message); }
   };
 
   const saveSession = async (id, data) => {
-    if (id) {
-      await DB.updateSession(id, data);
-      setSessions(ss => ss.map(s => s.id === id ? { ...s, ...data } : s));
-    } else {
-      const { data: rows } = await DB.addSession(data);
-      if (rows) setSessions(ss => [...ss, rows[0]]);
-    }
+    try {
+      if (id) {
+        await api('updateSession', { id, data });
+        setSessions(ss => ss.map(s => s.id === id ? { ...s, ...data } : s));
+      } else {
+        const res = await api('addSession', data);
+        if (res.data && res.data[0]) setSessions(ss => [...ss, res.data[0]]);
+      }
+    } catch (e) { setOpError('Session save failed: ' + e.message); }
   };
 
-  const deleteSession = async (id) => {
-    if (!window.confirm('Remove this session?')) return;
-    await DB.deleteSession(id);
-    setSessions(ss => ss.filter(s => s.id !== id));
+  const deleteSession = (id) => {
+    setConfirmDialog({
+      message: 'Remove this session from the schedule?',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        try {
+          await api('deleteSession', { id });
+          setSessions(ss => ss.filter(s => s.id !== id));
+        } catch (e) { setOpError('Delete failed: ' + e.message); }
+      },
+    });
   };
 
+  // CSV export with proper escaping to prevent injection
   const exportCSV = () => {
+    const csvEscape = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
     const rows = [['Name', 'Email', 'Mobile', 'Sessions', 'Tier']];
     clients.forEach(c => {
       const t = getTier(c.sessions_count);
       rows.push([c.name, c.email, c.mobile, c.sessions_count, t.name]);
     });
-    const csv = rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n');
+    const csv = rows.map(r => r.map(csvEscape).join(',')).join('\n');
     const a = document.createElement('a');
     a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
     a.download = 'learossek-clients.csv';
@@ -1519,7 +1604,7 @@ function AdminPanel({ onExit }) {
         <input style={{ ...base.input, ...(pwError ? { borderColor: '#e74c3c' } : {}) }} type="password" placeholder="Enter admin password" value={pw} onChange={e => { setPw(e.target.value); setPwErr(false); }} onKeyDown={e => e.key === 'Enter' && tryLogin()} />
         {pwError && <div style={{ color: '#e74c3c', fontSize: 12, marginTop: 6 }}>Incorrect password</div>}
       </div>
-      <button style={base.btn} onClick={tryLogin}>Enter</button>
+      <button style={{ ...base.btn, opacity: loginLoading ? 0.6 : 1 }} onClick={tryLogin} disabled={loginLoading}>{loginLoading ? 'Checking…' : 'Enter'}</button>
       <button onClick={onExit} style={{ background: 'none', border: 'none', color: '#bbb', marginTop: 18, cursor: 'pointer', fontSize: 13, fontFamily: 'Nunito' }}>← Back to app</button>
     </div>
   );
@@ -1550,6 +1635,27 @@ function AdminPanel({ onExit }) {
           </button>
         ))}
       </div>
+
+      {/* Operation error banner */}
+      {opError && (
+        <div style={{ background: '#fdeaea', borderBottom: '1px solid #f5c6c6', padding: '10px 16px', fontSize: 13, color: '#c0392b', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span><Icon name='warning' size={14} style={{marginRight:6}} />{opError}</span>
+          <button onClick={() => setOpError(null)} style={{ background: 'none', border: 'none', color: '#c0392b', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 4px' }}>×</button>
+        </div>
+      )}
+
+      {/* Custom confirm dialog (replaces window.confirm — blocked in Instagram WebView) */}
+      {confirmDialog && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 32px' }}>
+          <div style={{ background: '#fff', borderRadius: 18, padding: '24px 22px', width: '100%', maxWidth: 320 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: C.dark, marginBottom: 20, textAlign: 'center', lineHeight: 1.5 }}>{confirmDialog.message}</div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setConfirmDialog(null)} style={{ flex: 1, background: C.cream, border: `1px solid ${C.border}`, color: C.dark, borderRadius: 10, padding: '12px', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'Nunito' }}>Cancel</button>
+              <button onClick={confirmDialog.onConfirm} style={{ flex: 1, background: '#fdeaea', border: 'none', color: '#c0392b', borderRadius: 10, padding: '12px', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'Nunito' }}>Remove</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {loading && <Spinner />}
 
