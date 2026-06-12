@@ -6,6 +6,7 @@
   },
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1" },
+        { "src": "/app(/.*)?", "dest": "/learossek-app.html" },
     { "src": "/(.*)",     "dest": "/index.html" }
   ],
   "headers": [
