@@ -1,0 +1,1863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Lea Rossek | Lagree</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@200;300;400;600;700;800&family=Raleway:wght@200;300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/bold/style.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; }
+    body { font-family: 'Nunito', sans-serif; background: #f7fbf2; color: #1a1a1a; -webkit-font-smoothing: antialiased; }
+    #root { min-height: 100vh; }
+    input, textarea, button, select { font-family: 'Nunito', sans-serif; }
+    ::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+// ═══════════════════════════════════════════════════════════
+// CONFIGURATION
+// Supabase anon key is safe to expose in client code (it's a
+// "publishable" key — RLS policies enforce data access).
+// Admin password + service_role key are server-side only
+// (stored in Vercel env vars, never in this file).
+// ═══════════════════════════════════════════════════════════
+const SUPABASE_URL  = 'https://qczbaafjepwypcdlndgi.supabase.co';
+const SUPABASE_ANON = 'sb_publishable_USX-QCrRa3-jCu-s_hLP7Q_wfenH-Dz';
+
+// ─────────────────────────────────────────────
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+// Demo mode: if Supabase isn't configured yet, use mock data
+const DEMO_MODE = SUPABASE_URL === 'YOUR_SUPABASE_URL';
+
+// ─────────────────────────────────────────────
+// SECURITY HELPERS
+// ─────────────────────────────────────────────
+// Escape HTML to prevent XSS in any context that renders raw HTML (e.g. Leaflet popups)
+const escapeHtml = (s) => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+// Proper email validation (not just includes('@'))
+const isValidEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(e||'').trim());
+
+// Phone: allow digits, spaces, +, -, (, ) — 7–20 chars
+const isValidMobile = (m) => /^[+\d\s\-() ]{7,20}$/.test(String(m||'').trim());
+
+// Strip leading/trailing whitespace and cap length
+const sanitize = (s, max = 255) => String(s||'').trim().slice(0, max);
+
+// Admin API caller — all admin operations go through /api/admin
+// which validates the password server-side and uses the service_role key
+const adminFetch = async (action, payload, password) => {
+  const res = await fetch('/api/admin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, payload: payload || {}, password }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+};
+
+// ─────────────────────────────────────────────
+// MOCK DATA (used only in demo mode)
+// ─────────────────────────────────────────────
+const DEMO_SESSIONS = [
+  { id: '1', type: 'studio', title: 'Morning Session',  date: '2026-06-10', time: '07:30', duration: 50, location: 'Miziara Private Studio', address: 'Miziara, North Lebanon', lat: 34.283, lng: 35.683, capacity: 2, booked_count: 1, price: 35 },
+  { id: '2', type: 'studio', title: 'Evening Burn',     date: '2026-06-10', time: '18:00', duration: 50, location: 'Miziara Private Studio', address: 'Miziara, North Lebanon', lat: 34.283, lng: 35.683, capacity: 2, booked_count: 0, price: 35 },
+  { id: '3', type: 'guest',  title: 'Guest Class @ Flex Studio', date: '2026-06-14', time: '10:00', duration: 55, location: 'Flex Studio Beirut', address: 'Mar Mikhael, Beirut', lat: 33.894, lng: 35.532, capacity: null, booked_count: 0, price: 40, external_link: 'https://flexstudio.com/book', coupon: 'LEAROSSEK10' },
+  { id: '4', type: 'studio', title: 'Saturday Morning', date: '2026-06-15', time: '09:00', duration: 50, location: 'Miziara Private Studio', address: 'Miziara, North Lebanon', lat: 34.283, lng: 35.683, capacity: 2, booked_count: 2, price: 35 },
+  { id: '5', type: 'guest',  title: 'Pop-up @ Form Collective', date: '2026-06-19', time: '11:00', duration: 50, location: 'Form Collective', address: 'Achrafieh, Beirut', lat: 33.888, lng: 35.510, capacity: null, booked_count: 0, price: 45, external_link: 'https://formcollective.com/book', coupon: null },
+];
+const DEMO_BOOKINGS = [
+  { id: '1', client_name: 'Sarah K.', client_email: 'sarah@email.com', client_mobile: '+961 70 123 456', session_title: 'Morning Session',   session_date: '2026-06-10', session_type: 'studio',  status: 'pending'   },
+  { id: '2', client_name: 'Maya B.', client_email: 'maya@email.com',   client_mobile: '+961 71 234 567', session_title: 'Evening Burn',     session_date: '2026-06-10', session_type: 'studio',  status: 'confirmed' },
+  { id: '3', client_name: 'Lara N.', client_email: 'lara@email.com',   client_mobile: '+961 76 345 678', session_title: 'Private Session',  session_date: '2026-06-16', session_type: 'private', status: 'pending', private_address: 'Zouk Mosbeh, Jounieh' },
+];
+const DEMO_CLIENTS = [
+  { name: 'Lara N.',  email: 'lara@email.com',  mobile: '+961 76 345 678', sessions_count: 28 },
+  { name: 'Sarah K.', email: 'sarah@email.com', mobile: '+961 70 123 456', sessions_count: 14 },
+  { name: 'Maya B.',  email: 'maya@email.com',  mobile: '+961 71 234 567', sessions_count:  6 },
+  { name: 'Nour A.',  email: 'nour@email.com',  mobile: '+961 79 456 789', sessions_count:  3 },
+];
+const DEMO_PRICES = { studio: 35, private: 80 };
+
+// ─────────────────────────────────────────────
+// TIER DEFINITIONS
+// ─────────────────────────────────────────────
+const TIERS = [
+  { name: 'Bronze', min: 0,  max: 9,        discount: 0,  priority: false, earlyHrs: 0,  rebate: 0,  color: '#b08850', bg: '#fdf6ed', ph: 'medal',
+    perk: 'Welcome to the community',
+    perks: ['Earn points on every session', 'Book any open class'] },
+  { name: 'Silver', min: 10, max: 24,       discount: 10, priority: true,  earlyHrs: 24, rebate: 5,  color: '#7a90a8', bg: '#eef2f7', ph: 'medal',
+    perk: '10% off · Priority booking · 24h early access',
+    perks: ['10% off every session', 'Priority booking flag', '24h early access to new classes', '5% rebate on class packages'] },
+  { name: 'Gold',   min: 25, max: Infinity, discount: 20, priority: true,  earlyHrs: 48, rebate: 10, color: '#c9a84c', bg: '#fdf9ed', ph: 'trophy',
+    perk: '20% off · Priority booking · 48h early access · Monthly gift',
+    perks: ['20% off every session', 'Priority booking flag', '48h early access to new classes', '10% rebate on class packages', 'Monthly gift from Lea'] },
+];
+const getTier = (n) => TIERS.find(t => n >= t.min && n <= t.max) || TIERS[0];
+// Price after the client's tier discount
+const discountedPrice = (price, tier) => {
+  const p = Number(price) || 0;
+  if (!tier || !tier.discount) return { final: p, original: p, saved: 0 };
+  const final = Math.round((p * (1 - tier.discount / 100)) * 100) / 100;
+  return { final, original: p, saved: Math.round((p - final) * 100) / 100 };
+};
+
+// ─────────────────────────────────────────────
+// TIME-OF-DAY HELPER
+// ─────────────────────────────────────────────
+const timeOfDay = (timeStr) => {
+  if (!timeStr) return { ph: 'clock', label: 'Class', color: '#7a8c4a' };
+  const h = parseInt(timeStr.split(':')[0]);
+  if (h >= 5  && h < 12) return { ph: 'sun-horizon', label: 'Morning',   color: '#c8860a' };
+  if (h >= 12 && h < 17) return { ph: 'sun',         label: 'Afternoon', color: '#b87010' };
+  if (h >= 17 && h < 21) return { ph: 'sunset',      label: 'Evening',   color: '#7a5c9a' };
+  return { ph: 'moon',                                label: 'Night',     color: '#3a4a6a' };
+};
+
+// ─────────────────────────────────────────────
+// DESIGN
+// ─────────────────────────────────────────────
+const C = { olive: '#5a7032', sage: '#7a8c4a', mist: '#ddedc8', cream: '#f7fbf2', dark: '#3d5a1a', white: '#ffffff', text: '#1a1a1a', light: '#666', border: '#ddedc8' };
+const TYPE = {
+  label: { studio: 'Private Studio', guest: 'Guest Class', private: 'Private 1-on-1' },
+  color: { studio: '#5a7032', guest: '#7a8c4a', private: '#9ab56a' },
+  ph:    { studio: 'house',   guest: 'map-pin',  private: 'sparkle' },
+};
+const fmtDate = (d) => {
+  if (!d) return '';
+  const dt = new Date(d + 'T00:00:00');
+  return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+};
+
+const base = {
+  screen:   { minHeight: '100vh', background: C.cream, paddingBottom: 84 },
+  card:     { background: C.white, borderRadius: 16, margin: '10px 14px', boxShadow: '0 2px 14px rgba(90,112,50,0.07)', overflow: 'hidden' },
+  header:   { background: C.olive, padding: '20px 18px 16px' },
+  btn:      { background: C.olive, color: C.white, border: 'none', borderRadius: 12, padding: '14px 20px', fontSize: 15, fontWeight: 700, width: '100%', cursor: 'pointer', letterSpacing: 0.3, fontFamily: 'Nunito' },
+  btnMist:  { background: C.mist, color: C.dark, border: 'none', borderRadius: 12, padding: '13px 20px', fontSize: 14, fontWeight: 700, width: '100%', cursor: 'pointer', fontFamily: 'Nunito' },
+  btnOut:   { background: 'transparent', color: C.olive, border: `2px solid ${C.olive}`, borderRadius: 12, padding: '12px 20px', fontSize: 14, fontWeight: 700, width: '100%', cursor: 'pointer', fontFamily: 'Nunito' },
+  input:    { width: '100%', border: `1.5px solid ${C.border}`, borderRadius: 10, padding: '12px 14px', fontSize: 15, fontFamily: 'Nunito', background: '#fafff5', outline: 'none', color: C.text, WebkitAppearance: 'none' },
+  label:    { fontSize: 11, fontWeight: 800, color: C.sage, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 7, display: 'block' },
+};
+
+// ─────────────────────────────────────────────
+// SUPABASE DATA LAYER
+// ─────────────────────────────────────────────
+const DB = {
+  // Sessions
+  async getSessions() {
+    if (DEMO_MODE) return { data: DEMO_SESSIONS, error: null };
+    const today = new Date().toISOString().split('T')[0];
+    return sb.from('sessions').select('*').eq('active', true).gte('date', today).order('date').order('time');
+  },
+
+  async getAllSessions() {
+    if (DEMO_MODE) return { data: DEMO_SESSIONS, error: null };
+    return sb.from('sessions').select('*').order('date').order('time');
+  },
+
+  async addSession(data) {
+    if (DEMO_MODE) return { data: [{ id: Date.now().toString(), ...data }], error: null };
+    return sb.from('sessions').insert([data]).select();
+  },
+
+  async updateSession(id, data) {
+    if (DEMO_MODE) return { error: null };
+    return sb.from('sessions').update(data).eq('id', id);
+  },
+
+  async deleteSession(id) {
+    if (DEMO_MODE) return { error: null };
+    return sb.from('sessions').update({ active: false }).eq('id', id);
+  },
+
+  // Bookings
+  async submitBooking(data) {
+    if (DEMO_MODE) {
+      console.log('DEMO: would insert booking:', data);
+      return { error: null };
+    }
+    // Also upsert client record
+    await sb.from('clients').upsert(
+      [{ name: data.client_name, email: data.client_email.toLowerCase(), mobile: data.client_mobile }],
+      { onConflict: 'email', ignoreDuplicates: false }
+    );
+    return sb.from('bookings').insert([data]);
+  },
+
+  async getBookings() {
+    if (DEMO_MODE) return { data: DEMO_BOOKINGS, error: null };
+    return sb.from('bookings').select('*').order('created_at', { ascending: false });
+  },
+
+  async updateBookingStatus(id, status) {
+    if (DEMO_MODE) return { error: null };
+    return sb.from('bookings').update({ status }).eq('id', id);
+  },
+
+  // Clients
+  async getClientByEmail(email) {
+    if (DEMO_MODE) {
+      const found = DEMO_CLIENTS.find(c => c.email.toLowerCase() === email.toLowerCase());
+      return { data: found ? [found] : [], error: null };
+    }
+    return sb.from('clients').select('*').ilike('email', email).limit(1);
+  },
+
+  async getAllClients() {
+    if (DEMO_MODE) return { data: DEMO_CLIENTS, error: null };
+    return sb.from('clients').select('*').order('sessions_count', { ascending: false });
+  },
+
+  async updateClient(email, data) {
+    if (DEMO_MODE) return { error: null };
+    return sb.from('clients').update(data).ilike('email', email);
+  },
+
+  // Bookings for the logged-in client (by email)
+  async getBookingsByEmail(email) {
+    if (DEMO_MODE) {
+      const e = email.toLowerCase();
+      return { data: DEMO_BOOKINGS.filter(b => b.client_email.toLowerCase() === e), error: null };
+    }
+    return sb.from('bookings').select('*').ilike('client_email', email).order('session_date', { ascending: true });
+  },
+
+  async cancelBooking(id) {
+    if (DEMO_MODE) return { error: null };
+    return sb.from('bookings').update({ status: 'cancelled' }).eq('id', id);
+  },
+
+  // Prices
+  async getPrices() {
+    if (DEMO_MODE) return { data: DEMO_PRICES, error: null };
+    const { data, error } = await sb.from('prices').select('*');
+    if (error) return { data: DEMO_PRICES, error };
+    const prices = {};
+    (data || []).forEach(r => { prices[r.key] = parseFloat(r.amount); });
+    return { data: prices, error: null };
+  },
+
+  async updatePrice(key, amount) {
+    if (DEMO_MODE) return { error: null };
+    return sb.from('prices').update({ amount, updated_at: new Date().toISOString() }).eq('key', key);
+  },
+};
+
+
+// ─────────────────────────────────────────────
+// MAP COMPONENT (Leaflet / OpenStreetMap)
+// ─────────────────────────────────────────────
+function MapView({ lat, lng, label, address }) {
+  const mapId = useRef('map-' + Math.random().toString(36).substr(2,6));
+  const mapRef = useRef(null);
+
+  useEffect(() => {
+    if (!lat || !lng) return;
+    if (mapRef.current) return; // already init
+    setTimeout(() => {
+      const el = document.getElementById(mapId.current);
+      if (!el || !window.L) return;
+      const map = L.map(el, { zoomControl: true, scrollWheelZoom: false }).setView([lat, lng], 15);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap',
+        maxZoom: 19,
+      }).addTo(map);
+      const icon = L.divIcon({
+        html: `<div style="width:36px;height:36px;background:#5a7032;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3)"></div>`,
+        iconSize: [36, 36], iconAnchor: [18, 36], className: ''
+      });
+      L.marker([lat, lng], { icon }).addTo(map).bindPopup(`<b>${escapeHtml(label)}</b><br/>${escapeHtml(address)}`).openPopup();
+      mapRef.current = map;
+    }, 100);
+    return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
+  }, [lat, lng]);
+
+  if (!lat || !lng) return null;
+  return (
+    <div style={{ margin: '12px 14px 0', borderRadius: 14, overflow: 'hidden', border: '1.5px solid #ddedc8' }}>
+      <div id={mapId.current} style={{ height: 180, width: '100%' }} />
+      <a
+        href={`https://maps.google.com/?q=${lat},${lng}`}
+        target="_blank" rel="noopener noreferrer"
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '11px', background: '#f7fbf2', fontSize: 13, fontWeight: 700, color: '#5a7032', textDecoration: 'none' }}
+      >
+        <Icon name='map-pin' size={14} style={{marginRight:4}} />Open in Google Maps
+      </a>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// LOCAL STORAGE HELPERS — persist client after registration
+// ─────────────────────────────────────────────
+const LS_KEY = 'lr_client';
+const saveClient = (c) => { try { localStorage.setItem(LS_KEY, JSON.stringify(c)); } catch(e){} };
+const loadClient = ()    => { try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch(e){ return null; } };
+const clearClient = ()   => { try { localStorage.removeItem(LS_KEY); } catch(e){} };
+
+// ─────────────────────────────────────────────
+// REGISTER PAGE — with email OTP verification
+// ─────────────────────────────────────────────
+function RegisterPage({ onDone, setClient }) {
+  const [step, setStep]     = useState('form');   // 'form' | 'otp' | 'done'
+  const [form, setForm]     = useState({ name: '', email: '', mobile: '' });
+  const [otp, setOtp]       = useState('');
+  const [loading, setLoad]  = useState(false);
+  const [error, setError]   = useState(null);
+  const [resent, setResent] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0); // seconds remaining
+
+  const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }));
+  const validForm = sanitize(form.name).length >= 2 && isValidEmail(form.email) && isValidMobile(form.mobile);
+  const validOtp  = otp.trim().length >= 6;
+
+  // Step 1: save client record + send OTP email
+  const submitForm = async () => {
+    if (!validForm) return;
+    setLoad(true); setError(null);
+
+    if (DEMO_MODE) {
+      // Demo: skip OTP, save to localStorage and finish
+      (setClient || saveClient)({ name: form.name.trim(), email: form.email.trim().toLowerCase(), mobile: form.mobile.trim(), sessions_count: 0, preferences: {} });
+      setTimeout(() => { setLoad(false); setStep('done'); }, 700);
+      return;
+    }
+
+    // Upsert client record first
+    const { error: dbErr } = await sb.from('clients').upsert(
+      [{ name: form.name.trim(), email: form.email.trim().toLowerCase(), mobile: form.mobile.trim(), sessions_count: 0 }],
+      { onConflict: 'email', ignoreDuplicates: false }
+    );
+    if (dbErr) { setLoad(false); setError(dbErr.message); return; }
+
+    // Send OTP via Supabase Auth
+    const { error: otpErr } = await sb.auth.signInWithOtp({
+      email: form.email.trim().toLowerCase(),
+      options: { shouldCreateUser: true, data: { name: form.name.trim() } }
+    });
+    setLoad(false);
+    if (otpErr) { setError(otpErr.message); return; }
+    setStep('otp');
+  };
+
+  // Step 2: verify OTP
+  const verifyOtp = async () => {
+    if (!validOtp) return;
+    setLoad(true); setError(null);
+
+    // Try 'signup' type first (new users), fall back to 'email' (returning users)
+    let verifyErr = null;
+    for (const otpType of ['signup', 'email', 'magiclink']) {
+      const result = await sb.auth.verifyOtp({
+        email: form.email.trim().toLowerCase(),
+        token: otp.trim(),
+        type: otpType,
+      });
+      if (!result.error) { verifyErr = null; break; }
+      verifyErr = result.error;
+    }
+    setLoad(false);
+    if (verifyErr) { setError('Invalid or expired code. Try again.'); return; }
+
+    // Save to global session so booking forms pre-fill and login is recognised
+    (setClient || saveClient)({ name: form.name.trim(), email: form.email.trim().toLowerCase(), mobile: form.mobile.trim(), sessions_count: 0, preferences: {} });
+    setStep('done');
+  };
+
+  const resendOtp = async () => {
+    if (resendCooldown > 0) return;
+    setResent(false);
+    await sb.auth.signInWithOtp({ email: form.email.trim().toLowerCase(), options: { shouldCreateUser: false } });
+    setResent(true);
+    // 60-second cooldown to prevent spam
+    setResendCooldown(60);
+    const timer = setInterval(() => {
+      setResendCooldown(c => { if (c <= 1) { clearInterval(timer); return 0; } return c - 1; });
+    }, 1000);
+  };
+
+  // ── DONE ──
+  if (step === 'done') return (
+    <div style={{ ...base.screen, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 28px' }}>
+      <div style={{ width: 90, height: 90, borderRadius: '50%', background: C.mist, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 24 }}>
+        <Icon name='check' size={40} color={C.olive} weight='bold' />
+      </div>
+      <div style={{ fontSize: 24, fontWeight: 300, color: C.olive, letterSpacing: 2, marginBottom: 10, textAlign: 'center' }}>Welcome!</div>
+      <div style={{ fontSize: 14, color: C.light, textAlign: 'center', lineHeight: 1.7, marginBottom: 10 }}>
+        You're part of the Lea Rossek community,<br/><strong>{form.name.trim()}</strong>.
+      </div>
+      <div style={{ fontSize: 13, color: C.sage, textAlign: 'center', marginBottom: 30 }}>
+        Your details are saved — booking forms will pre-fill automatically.
+      </div>
+      <button style={base.btn} onClick={onDone}>View Schedule</button>
+    </div>
+  );
+
+  // ── OTP STEP ──
+  if (step === 'otp') return (
+    <div style={base.screen}>
+      <div style={{ ...base.header, textAlign: 'center', padding: '28px 20px 24px' }}>
+        <img src={LOGO_B64} style={{ width: 60, height: 60, borderRadius: '50%', marginBottom: 14 }} alt="Lea Rossek" />
+        <div style={{ color: C.white, fontSize: 20, fontWeight: 200, letterSpacing: 3 }}>Check Your Email</div>
+        <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: 13, marginTop: 4 }}>
+          Code sent to {form.email}
+        </div>
+      </div>
+
+      <div style={{ padding: '24px 16px' }}>
+        <div style={{ background: C.white, borderRadius: 16, padding: '24px 20px', boxShadow: '0 2px 14px rgba(90,112,50,0.07)', marginBottom: 14 }}>
+          <div style={{ fontSize: 13, color: '#555', lineHeight: 1.6, marginBottom: 20, textAlign: 'center' }}>
+            Enter the 6-digit code from the email we sent you. Check your spam folder if you don't see it.
+          </div>
+
+          <label style={base.label}>Verification Code</label>
+          <input
+            style={{ ...base.input, fontSize: 28, fontWeight: 800, letterSpacing: 8, textAlign: 'center', color: C.olive }}
+            type='text'
+            inputMode='numeric'
+            pattern='[0-9]*'
+            autoComplete='one-time-code'
+            placeholder='00000000'
+            maxLength={8}
+            value={otp}
+            onChange={e => { setOtp(e.target.value.replace(/\D/g,'').slice(0,8)); setError(null); }}
+          />
+
+          {error && <div style={{ color: '#e74c3c', fontSize: 13, marginTop: 10, textAlign: 'center' }}>{error}</div>}
+          {resent && <div style={{ color: C.sage, fontSize: 13, marginTop: 10, textAlign: 'center' }}>Code resent!</div>}
+
+          <button
+            style={{ ...base.btn, marginTop: 18, opacity: validOtp ? 1 : 0.45 }}
+            onClick={verifyOtp} disabled={!validOtp || loading}
+          >
+            {loading ? 'Verifying…' : 'Verify Email'}
+          </button>
+        </div>
+
+        <div style={{ textAlign: 'center' }}>
+          <button onClick={resendOtp} disabled={resendCooldown > 0} style={{ background: 'none', border: 'none', color: resendCooldown > 0 ? '#bbb' : C.sage, fontSize: 13, cursor: resendCooldown > 0 ? 'default' : 'pointer', fontFamily: 'Nunito', marginBottom: 8 }}>
+            {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Didn't receive it? Resend code"}
+          </button>
+          <br/>
+          <button onClick={() => { setStep('form'); setOtp(''); setError(null); }} style={{ background: 'none', border: 'none', color: '#aaa', fontSize: 13, cursor: 'pointer', fontFamily: 'Nunito' }}>
+            ← Change email
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── FORM STEP ──
+  return (
+    <div style={base.screen}>
+      <div style={{ ...base.header, textAlign: 'center', padding: '28px 20px 24px' }}>
+        <img src={LOGO_B64} style={{ width: 70, height: 70, borderRadius: '50%', marginBottom: 14 }} alt="Lea Rossek" />
+        <div style={{ color: C.white, fontSize: 22, fontWeight: 200, letterSpacing: 3 }}>Join the Community</div>
+        <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: 13, marginTop: 4 }}>Register to track your sessions & rewards</div>
+      </div>
+
+      {/* Tier teaser */}
+      <div style={{ display: 'flex', gap: 8, padding: '14px 14px 0' }}>
+        {TIERS.map(t => (
+          <div key={t.name} style={{ flex: 1, background: C.white, borderRadius: 12, padding: '12px 8px', textAlign: 'center', boxShadow: '0 2px 8px rgba(90,112,50,0.07)' }}>
+            <Icon name={t.ph} size={22} color={t.color} />
+            <div style={{ fontSize: 12, fontWeight: 800, color: t.color, marginTop: 4 }}>{t.name}</div>
+            <div style={{ fontSize: 10, color: C.light, marginTop: 2 }}>{t.discount > 0 ? `${t.discount}% off` : 'Starter'}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ margin: '16px 14px 0', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" maxLength={80} value={form.name} onChange={set('name')} /></div>
+        <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" maxLength={120} autoComplete="email" value={form.email} onChange={set('email')} /></div>
+        <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" maxLength={20} autoComplete="tel" value={form.mobile} onChange={set('mobile')} /></div>
+
+        <div style={{ background: C.cream, border: `1px solid ${C.border}`, borderRadius: 10, padding: '12px 14px', fontSize: 13, color: '#444', lineHeight: 1.5, display: 'flex', gap: 8 }}>
+          <Icon name='envelope' size={16} color={C.sage} style={{marginTop:1,flexShrink:0}} />
+          <span>We'll send a verification code to your email to confirm your account.</span>
+        </div>
+
+        {error && <div style={{ color: '#e74c3c', fontSize: 13, textAlign: 'center' }}>{error}</div>}
+        <button style={{ ...base.btn, opacity: validForm ? 1 : 0.45 }} onClick={submitForm} disabled={!validForm || loading}>
+          {loading ? 'Sending code…' : 'Create My Account'}
+        </button>
+        <button style={{ background: 'none', border: 'none', color: C.light, fontSize: 13, cursor: 'pointer', paddingBottom: 10 }} onClick={onDone}>
+          Skip for now
+        </button>
+      </div>
+    </div>
+  );
+}
+// ─────────────────────────────────────────────
+// SHARED COMPONENTS
+// ─────────────────────────────────────────────
+const LOGO_B64 = 'data:image/png;base64,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';
+// Icon component — wraps Phosphor icons with consistent sizing
+function Icon({ name, size = 20, weight = 'regular', color, style: extraStyle = {} }) {
+  return (
+    <i
+      className={`ph${weight === 'bold' ? '-bold' : ''} ph-${name}`}
+      style={{ fontSize: size, color: color, lineHeight: 1, display: 'inline-flex', alignItems: 'center', ...extraStyle }}
+    />
+  );
+}
+
+function Logo({ size = 44 }) {
+  return <img src={LOGO_B64} style={{ width: size, height: size, borderRadius: '50%', flexShrink: 0, objectFit: 'cover' }} alt="Lea Rossek" />;
+}
+
+function Spinner() {
+  return <div style={{ textAlign: 'center', padding: 40, color: '#aaa', fontSize: 14 }}>Loading…</div>;
+}
+
+// Round avatar showing the client's initial, tinted with their tier color
+function Avatar({ client, size = 38 }) {
+  const tier = client ? getTier(client.sessions_count || 0) : null;
+  const initial = client?.name ? client.name.trim()[0].toUpperCase() : '?';
+  return (
+    <div style={{ width: size, height: size, borderRadius: '50%', background: tier ? tier.color : 'rgba(255,255,255,0.18)', color: C.white, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, border: '2px solid rgba(255,255,255,0.55)' }}>
+      {initial}
+    </div>
+  );
+}
+
+// Small pill in headers: shows who's logged in (or a Sign-in nudge)
+function LoginPill({ client, onClick }) {
+  const tier = client ? getTier(client.sessions_count || 0) : null;
+  if (!client) return (
+    <button onClick={onClick} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,0.14)', border: 'none', color: C.white, padding: '7px 12px', borderRadius: 22, fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'Nunito' }}>
+      <Icon name='sign-in' size={15} color={C.white} /> Sign in
+    </button>
+  );
+  return (
+    <button onClick={onClick} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.14)', border: 'none', padding: '5px 12px 5px 5px', borderRadius: 24, cursor: 'pointer', fontFamily: 'Nunito' }}>
+      <Avatar client={client} size={30} />
+      <div style={{ textAlign: 'left', lineHeight: 1.1 }}>
+        <div style={{ color: C.white, fontSize: 12, fontWeight: 800 }}>{client.name.split(' ')[0]}</div>
+        <div style={{ color: tier.color === '#c9a84c' ? '#f3e6b8' : 'rgba(255,255,255,0.7)', fontSize: 9, fontWeight: 800, letterSpacing: 1, textTransform: 'uppercase' }}>{tier.name}</div>
+      </div>
+    </button>
+  );
+}
+
+// Tier chip used inline
+function TierBadge({ tier, size = 'sm' }) {
+  const pad = size === 'lg' ? '6px 14px' : '4px 10px';
+  const fs  = size === 'lg' ? 13 : 11;
+  return (
+    <span style={{ background: tier.color, color: C.white, borderRadius: 20, padding: pad, fontSize: fs, fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5, letterSpacing: 0.3 }}>
+      <Icon name={tier.ph} size={fs + 2} color={C.white} />{tier.name}
+    </span>
+  );
+}
+
+function NavBar({ page, setPage, client }) {
+  const items = [
+    { id: 'home',     ph: 'calendar-blank', label: 'Schedule'  },
+    { id: 'bookings', ph: 'calendar-check', label: 'My Classes' },
+    { id: 'profile',  ph: 'star',           label: 'Rewards'   },
+    client
+      ? { id: 'account', ph: 'user-circle', label: 'Account' }
+      : { id: 'register', ph: 'user-plus',  label: 'Join'    },
+  ];
+  return (
+    <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, background: C.white, borderTop: `1px solid ${C.border}`, display: 'flex', zIndex: 100, paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+      {items.map(i => (
+        <button key={i.id} onClick={() => setPage(i.id)} style={{ flex: 1, padding: '10px 0 8px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, cursor: 'pointer', background: 'none', border: 'none', color: page === i.id ? C.olive : '#bbb', transition: 'color 0.15s' }}>
+          <Icon name={i.ph} size={22} color={page === i.id ? C.olive : '#bbb'} />
+          <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.5 }}>{i.label}</span>
+          {page === i.id && <div style={{ width: 20, height: 3, background: C.olive, borderRadius: 2, marginTop: 1 }} />}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// SESSION CARD
+// ─────────────────────────────────────────────
+function SessionCard({ session, onClick, client, featured = false }) {
+  const spots = session.capacity != null ? session.capacity - session.booked_count : 99;
+  const full  = spots === 0;
+  const low   = spots > 0 && spots <= 2 && session.capacity != null;
+  const tc    = TYPE.color[session.type];
+  const tod   = timeOfDay(session.time);
+  const tier  = client ? getTier(client.sessions_count || 0) : null;
+  const isPriority = !!(tier && tier.priority);
+  const dp    = discountedPrice(session.price, tier);
+
+  return (
+    <div
+      onClick={() => !full && onClick(session)}
+      style={{
+        ...base.card,
+        opacity: full ? 0.72 : 1,
+        cursor: full ? 'default' : 'pointer',
+        border: featured ? `1.5px solid ${C.olive}` : '1px solid transparent',
+        boxShadow: featured ? '0 8px 26px rgba(90,112,50,0.18)' : '0 2px 14px rgba(90,112,50,0.07)',
+      }}
+    >
+      <div style={{ height: featured ? 6 : 4, background: featured ? `linear-gradient(90deg, ${C.olive}, ${C.sage})` : tc }} />
+      <div style={{ padding: '14px 16px 16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            {featured && <span style={{ background: C.olive, color: C.white, fontSize: 10, fontWeight: 800, letterSpacing: 1, padding: '4px 10px', borderRadius: 20, display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon name='star' size={11} color={C.white} weight='bold' />NEXT UP</span>}
+            <span style={{ background: tc + '18', color: tc, fontSize: 10, fontWeight: 800, letterSpacing: 1, padding: '4px 10px', borderRadius: 20, textTransform: 'uppercase' }}>
+              <Icon name={TYPE.ph[session.type]} size={12} style={{marginRight:4}} /> {TYPE.label[session.type]}
+            </span>
+            {isPriority && !full && <span style={{ background: '#c9a84c18', color: '#b3902f', fontSize: 10, fontWeight: 800, letterSpacing: 0.5, padding: '4px 9px', borderRadius: 20, display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon name='crown-simple' size={11} color='#b3902f' />Priority</span>}
+          </div>
+          {full && <span style={{ fontSize: 11, fontWeight: 800, color: '#e74c3c', background: '#fdeaea', padding: '4px 10px', borderRadius: 20 }}>Full</span>}
+          {low  && <span style={{ fontSize: 11, fontWeight: 800, color: '#d4820a', background: '#fff4e0', padding: '4px 10px', borderRadius: 20, display:'inline-flex', alignItems:'center', gap:4 }}><Icon name='lightning' size={11} />{spots} spot{spots > 1 ? 's' : ''} left</span>}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 12, background: tod.color + '16', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <Icon name={tod.ph} size={24} color={tod.color} />
+          </div>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: C.text, lineHeight: 1.15 }}>{session.title}</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: tod.color, letterSpacing: 0.5 }}>{tod.label}</div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', fontSize: 12, color: C.light, marginBottom: 6 }}>
+          <span><Icon name='calendar' size={13} style={{marginRight:4}} />{fmtDate(session.date)}</span>
+          <span><Icon name='clock' size={13} style={{marginRight:4}} />{session.time}</span>
+          <span><Icon name='timer' size={13} style={{marginRight:4}} />{session.duration} min</span>
+        </div>
+        <div style={{ fontSize: 12, color: C.light, marginBottom: 14, display:'flex', alignItems:'center', gap:5 }}><Icon name='map-pin' size={13} />{session.location}</div>
+        {session.coupon && (
+          <div style={{ background: C.cream, border: `1.5px dashed ${C.sage}`, borderRadius: 8, padding: '8px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <span style={{ fontSize: 12, color: C.light, display:'flex', alignItems:'center', gap:4 }}><Icon name='ticket' size={13} />Coupon code</span>
+            <span style={{ fontWeight: 800, color: C.olive, letterSpacing: 2, fontSize: 13 }}>{session.coupon}</span>
+          </div>
+        )}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 7 }}>
+            {dp.saved > 0 && <span style={{ fontSize: 15, fontWeight: 700, color: '#bbb', textDecoration: 'line-through' }}>${dp.original}</span>}
+            <span style={{ fontSize: 26, fontWeight: 800, color: C.olive }}>${dp.final}</span>
+            <span style={{ fontSize: 12, color: '#aaa' }}>USD</span>
+            {dp.saved > 0 && <span style={{ fontSize: 10, fontWeight: 800, color: tier.color, background: tier.color + '18', padding: '2px 7px', borderRadius: 12 }}>{tier.name} −{tier.discount}%</span>}
+          </div>
+          {!full && <div style={{ background: C.olive, color: C.white, borderRadius: 10, padding: '9px 18px', fontSize: 13, fontWeight: 700 }}>{session.type === 'guest' ? 'View & Book →' : 'Book →'}</div>}
+          {full  && <div style={{ background: '#f0f0f0', color: '#aaa', borderRadius: 10, padding: '9px 16px', fontSize: 13, fontWeight: 700 }}>Waitlist</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// BOOKING FORM
+// ─────────────────────────────────────────────
+function BookingForm({ session, client, setClient, onBack, onDone }) {
+  const isGuest = session.type === 'guest';
+  const tier  = client ? getTier(client.sessions_count || 0) : null;
+  const dp    = discountedPrice(session.price, tier);
+  const isPriority = !!(tier && tier.priority);
+
+  // Guest (not logged in) needs to provide details; logged-in users just confirm.
+  const [form, setForm]     = useState({ name: client?.name||'', email: client?.email||'', mobile: client?.mobile||'' });
+  const [submitted, setSub] = useState(false);
+  const [loading, setLoad]  = useState(false);
+  const [error, setError]   = useState(null);
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const valid = sanitize(form.name).length >= 2 && isValidEmail(form.email) && isValidMobile(form.mobile);
+
+  const submit = async () => {
+    if (!client && !valid) return;
+    const name = (client?.name || form.name).trim();
+    const email = (client?.email || form.email).trim().toLowerCase();
+    const mobile = (client?.mobile || form.mobile).trim();
+    setLoad(true); setError(null);
+    const { error } = await DB.submitBooking({
+      client_name:   name,
+      client_email:  email,
+      client_mobile: mobile,
+      session_id:    session.id,
+      session_title: session.title,
+      session_date:  session.date,
+      session_time:  session.time,
+      session_type:  session.type,
+      priority:      isPriority,
+    });
+    setLoad(false);
+    if (error) { setError('Something went wrong. Please try again.'); return; }
+    // First-time guest who just booked becomes a saved client
+    if (!client && setClient) setClient({ name, email, mobile, sessions_count: 0, preferences: {} });
+    setSub(true);
+  };
+
+  // ── LOCKED CONFIRMATION ──
+  if (submitted) return (
+    <div style={{ ...base.screen, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 28px' }}>
+      <div style={{ width: 92, height: 92, borderRadius: '50%', background: C.mist, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 22, position: 'relative' }}>
+        <Icon name='lock-key' size={38} color={C.olive} weight='bold' />
+      </div>
+      <div style={{ fontSize: 24, fontWeight: 300, color: C.olive, letterSpacing: 2, marginBottom: 10, textAlign: 'center' }}>{isGuest ? 'Registered!' : 'Spot Locked In'}</div>
+      <div style={{ fontSize: 14, color: C.light, textAlign: 'center', lineHeight: 1.7, marginBottom: 22 }}>
+        {isGuest ? <>You're registered for <strong>{session.title}</strong>. Lea will track your attendance and award your points.</> : <>Your spot for <strong>{session.title}</strong> on {fmtDate(session.date)} is reserved. You'll find it under <strong>My Classes</strong>.</>}
+      </div>
+      <div style={{ background: C.white, border: `1.5px solid ${C.border}`, borderRadius: 14, padding: '16px 18px', marginBottom: 16, width: '100%' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}><span style={{ color: C.light }}>When</span><strong>{fmtDate(session.date)} · {session.time}</strong></div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}><span style={{ color: C.light }}>Where</span><strong>{session.location}</strong></div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}><span style={{ color: C.light }}>Pay on the day</span><strong style={{ color: C.olive }}>${dp.final} USD{dp.saved > 0 ? ` (saved $${dp.saved})` : ''}</strong></div>
+      </div>
+      <button style={base.btn} onClick={onDone}>Done</button>
+    </div>
+  );
+
+  return (
+    <div style={base.screen}>
+      <div style={{ ...base.header, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button onClick={onBack} style={{ background: 'none', border: 'none', color: C.white, cursor: 'pointer', lineHeight: 1, padding: '0 4px 0 0', display:'flex', alignItems:'center' }}><Icon name='arrow-left' size={22} color={C.white} /></button>
+        <span style={{ color: C.white, fontSize: 16, fontWeight: 300, letterSpacing: 2 }}>{isGuest ? 'Register for Class' : 'Confirm Booking'}</span>
+      </div>
+
+      <div style={{ ...base.card, margin: '14px 14px 0' }}>
+        <div style={{ height: 4, background: TYPE.color[session.type] }} />
+        <div style={{ padding: '14px 16px' }}>
+          <span style={{ background: TYPE.color[session.type] + '18', color: TYPE.color[session.type], fontSize: 10, fontWeight: 800, letterSpacing: 1, padding: '4px 10px', borderRadius: 20, textTransform: 'uppercase' }}><Icon name={TYPE.ph[session.type]} size={12} style={{marginRight:4}} /> {TYPE.label[session.type]}</span>
+          <div style={{ fontSize: 18, fontWeight: 700, marginTop: 8, marginBottom: 6 }}>{session.title}</div>
+          <div style={{ fontSize: 13, color: C.light, marginBottom: 2, display:'flex', alignItems:'center', gap:5 }}><Icon name='calendar' size={13} />{fmtDate(session.date)}<Icon name='clock' size={13} style={{marginLeft:6}} />{session.time}</div>
+          <div style={{ fontSize: 13, color: C.light, marginBottom: session.coupon ? 12 : 0, display:'flex', alignItems:'center', gap:5 }}><Icon name='map-pin' size={13} />{session.location}</div>
+          {isGuest && session.coupon && (
+            <div style={{ background: C.cream, border: `1.5px dashed ${C.sage}`, borderRadius: 8, padding: '10px 14px', marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 12, color: C.light, display:'flex', alignItems:'center', gap:4 }}><Icon name='ticket' size={13} />Coupon code:</span>
+              <span style={{ fontWeight: 800, color: C.olive, letterSpacing: 2, fontSize: 15 }}>{session.coupon}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <MapView lat={session.lat} lng={session.lng} label={session.location} address={session.address} />
+
+      {isGuest && (
+        <div style={{ margin: '12px 14px 0' }}>
+          <div style={{ fontSize: 13, color: '#555', lineHeight: 1.6, marginBottom: 10, padding: '0 2px' }}>Book your spot at the studio, then register below so Lea can award your rewards points.</div>
+          <a href={session.external_link} target="_blank" rel="noopener noreferrer" style={{ display: 'block', background: C.mist, color: C.dark, borderRadius: 12, padding: '13px', fontSize: 15, fontWeight: 700, textAlign: 'center', textDecoration: 'none' }}>
+            Book at {session.location} →
+          </a>
+        </div>
+      )}
+
+      {/* Price summary with tier discount */}
+      {!isGuest && (
+        <div style={{ ...base.card, margin: '12px 14px 0', padding: '14px 16px' }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.sage, letterSpacing: 1.5, marginBottom: 10 }}>PAYMENT · ON THE DAY · CASH</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: C.light, marginBottom: dp.saved > 0 ? 6 : 0 }}>
+            <span>Session</span><span>${dp.original} USD</span>
+          </div>
+          {dp.saved > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: tier.color, fontWeight: 700, marginBottom: 6 }}>
+              <span>{tier.name} discount (−{tier.discount}%)</span><span>−${dp.saved}</span>
+            </div>
+          )}
+          <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 8, paddingTop: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={{ fontWeight: 800, color: C.text }}>Total</span>
+            <span style={{ fontSize: 24, fontWeight: 800, color: C.olive }}>${dp.final} <span style={{ fontSize: 12, color: '#aaa', fontWeight: 400 }}>USD</span></span>
+          </div>
+        </div>
+      )}
+
+      {/* Logged-in: seamless confirm */}
+      {client ? (
+        <div style={{ margin: '14px 14px 0' }}>
+          <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 12, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+            <Avatar client={client} size={40} />
+            <div style={{ flex: 1, lineHeight: 1.3 }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{client.name}</div>
+              <div style={{ fontSize: 12, color: C.light }}>{client.email} · {client.mobile}</div>
+            </div>
+          </div>
+          {isPriority && (
+            <div style={{ background: '#fdf9ed', border: '1px solid #e9d79a', borderRadius: 10, padding: '11px 14px', marginBottom: 12, fontSize: 13, color: '#8a6d1e', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Icon name='crown-simple' size={16} color='#b3902f' /><span><strong>{tier.name} priority</strong> — your request is flagged ahead of standard bookings.</span>
+            </div>
+          )}
+          {error && <div style={{ color: '#e74c3c', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>{error}</div>}
+          <button style={{ ...base.btn, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }} onClick={submit} disabled={loading}>
+            <Icon name='lock-key' size={16} color={C.white} />{loading ? 'Locking in…' : isGuest ? 'Register Attendance' : 'Confirm & Lock Spot'}
+          </button>
+          <div style={{ fontSize: 11, color: '#bbb', textAlign: 'center', marginTop: 10, paddingBottom: 10, lineHeight: 1.5 }}>Payment collected on the day · Cash accepted</div>
+        </div>
+      ) : (
+        /* Guest: compact details form */
+        <div style={{ margin: '14px 14px 0' }}>
+          <div style={base.label}>Your Details</div>
+          <div style={{ background: C.cream, border: `1px solid ${C.border}`, borderRadius: 10, padding: '10px 12px', margin: '8px 0 14px', fontSize: 12, color: C.sage, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Icon name='star' size={14} /><span>We'll save these so you never type them again — and start earning rewards.</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" maxLength={80} value={form.name} onChange={set('name')} /></div>
+            <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" maxLength={120} autoComplete="email" value={form.email} onChange={set('email')} /></div>
+            <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" maxLength={20} autoComplete="tel" value={form.mobile} onChange={set('mobile')} /></div>
+          </div>
+          {error && <div style={{ color: '#e74c3c', fontSize: 13, margin: '12px 0', textAlign: 'center' }}>{error}</div>}
+          <button style={{ ...base.btn, opacity: valid ? 1 : 0.45, marginTop: 16 }} onClick={submit} disabled={!valid || loading}>
+            {loading ? 'Sending…' : isGuest ? 'Register Attendance' : `Confirm Booking · $${session.price} USD`}
+          </button>
+          <div style={{ fontSize: 11, color: '#bbb', textAlign: 'center', marginTop: 10, paddingBottom: 10, lineHeight: 1.5 }}>Payment collected on the day · Cash accepted</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// HOME / SCHEDULE
+// ─────────────────────────────────────────────
+// Month calendar — highlights days that have classes; tap a day to filter
+function MonthCalendar({ sessions, selected, onSelect }) {
+  const [cursor, setCursor] = useState(() => {
+    const d = selected ? new Date(selected + 'T00:00:00') : new Date();
+    return { y: d.getFullYear(), m: d.getMonth() };
+  });
+  const byDay = {};
+  sessions.forEach(s => { (byDay[s.date] = byDay[s.date] || []).push(s); });
+
+  const first = new Date(cursor.y, cursor.m, 1);
+  const startPad = first.getDay();                 // 0=Sun
+  const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
+  const todayStr = new Date().toISOString().split('T')[0];
+  const monthLabel = first.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const pad2 = n => String(n).padStart(2, '0');
+  const cells = [];
+  for (let i = 0; i < startPad; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const shift = (dir) => setCursor(c => {
+    let m = c.m + dir, y = c.y;
+    if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; }
+    return { y, m };
+  });
+
+  return (
+    <div style={{ ...base.card, margin: '12px 14px 0', padding: '14px 14px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <button onClick={() => shift(-1)} style={{ background: C.cream, border: 'none', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name='caret-left' size={16} color={C.olive} /></button>
+        <div style={{ fontSize: 15, fontWeight: 800, color: C.dark }}>{monthLabel}</div>
+        <button onClick={() => shift(1)} style={{ background: C.cream, border: 'none', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name='caret-right' size={16} color={C.olive} /></button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, textAlign: 'center', marginBottom: 4 }}>
+        {['S','M','T','W','T','F','S'].map((d,i) => <div key={i} style={{ fontSize: 10, fontWeight: 800, color: '#bbb', letterSpacing: 0.5 }}>{d}</div>)}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
+        {cells.map((d, i) => {
+          if (!d) return <div key={i} />;
+          const ds = `${cursor.y}-${pad2(cursor.m + 1)}-${pad2(d)}`;
+          const has = !!byDay[ds];
+          const isSel = selected === ds;
+          const isToday = todayStr === ds;
+          return (
+            <button key={i} onClick={() => onSelect(isSel ? null : ds)} disabled={!has}
+              style={{ aspectRatio: '1', borderRadius: 10, border: isToday ? `1.5px solid ${C.sage}` : '1.5px solid transparent',
+                background: isSel ? C.olive : has ? C.mist : 'transparent',
+                color: isSel ? C.white : has ? C.dark : '#ccc',
+                fontSize: 13, fontWeight: has ? 800 : 500, cursor: has ? 'pointer' : 'default',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', position: 'relative', fontFamily: 'Nunito' }}>
+              {d}
+              {has && <div style={{ width: 4, height: 4, borderRadius: '50%', background: isSel ? C.white : C.olive, marginTop: 2 }} />}
+            </button>
+          );
+        })}
+      </div>
+      {selected && <button onClick={() => onSelect(null)} style={{ background: 'none', border: 'none', color: C.sage, fontSize: 12, fontWeight: 700, cursor: 'pointer', marginTop: 12, fontFamily: 'Nunito' }}>Clear day filter ×</button>}
+    </div>
+  );
+}
+
+function HomePage({ onBookSession, onOpenPrivate, tapLogo, openAdmin, client, onOpenAccount }) {
+  const [sessions, setSessions] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [filter, setFilter]     = useState('all');
+  const [view, setView]         = useState('calendar');   // 'calendar' | 'list'
+  const [day, setDay]           = useState(null);
+
+  useEffect(() => {
+    DB.getSessions().then(({ data }) => { setSessions(data || []); setLoading(false); });
+  }, []);
+
+  const calMode  = view === 'calendar';
+  const filtered = sessions.filter(s => filter === 'all' || s.type === filter);
+  // In calendar mode, show the tapped day — or default to the nearest class day
+  const effDay   = calMode ? (day || (filtered[0] && filtered[0].date) || null) : null;
+  const dayList  = effDay ? filtered.filter(s => s.date === effDay) : [];
+  const featured = calMode ? null : filtered[0];
+  const rest     = calMode ? dayList : filtered.slice(1);
+  const studio   = sessions.find(s => s.lat && s.lng) || null;
+
+  return (
+    <div style={base.screen}>
+      <div style={base.header}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }} onClick={tapLogo} onDoubleClick={openAdmin}>
+            <Logo size={46} />
+            <div>
+              <div style={{ color: C.white, fontSize: 20, fontWeight: 200, letterSpacing: 4, fontFamily: 'Raleway, Nunito, sans-serif' }}>lea rossek</div>
+              <div style={{ color: '#b5d18a', fontSize: 10, letterSpacing: 3, fontWeight: 300, marginTop: 2, textTransform: 'uppercase' }}>LAGREE STUDIO</div>
+            </div>
+          </div>
+          <LoginPill client={client} onClick={onOpenAccount} />
+        </div>
+        {DEMO_MODE && <div style={{ marginBottom: 10 }}><span style={{ background: 'rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.85)', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 6 }}>DEMO MODE</span></div>}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[{ id: 'all', label: 'All' }, { id: 'studio', label: 'Studio' }, { id: 'guest',  label: 'Guest'  }].map(f => (
+              <button key={f.id} onClick={() => setFilter(f.id)} style={{ background: filter === f.id ? C.white : 'transparent', color: filter === f.id ? C.olive : 'rgba(255,255,255,0.65)', border: `1.5px solid ${filter === f.id ? C.white : 'rgba(255,255,255,0.3)'}`, borderRadius: 20, padding: '6px 16px', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'Nunito', transition: 'all 0.15s' }}>{f.label}</button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', background: 'rgba(255,255,255,0.14)', borderRadius: 20, padding: 3 }}>
+            {[{ id: 'list', ph: 'list-bullets' }, { id: 'calendar', ph: 'calendar-blank' }].map(v => (
+              <button key={v.id} onClick={() => { setView(v.id); }} style={{ background: view === v.id ? C.white : 'transparent', borderRadius: 18, border: 'none', padding: '6px 11px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                <Icon name={v.ph} size={15} color={view === v.id ? C.olive : 'rgba(255,255,255,0.8)'} />
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {calMode && !loading && <MonthCalendar sessions={filtered} selected={effDay} onSelect={setDay} />}
+
+      <div style={{ paddingTop: 4 }}>
+        {loading && <Spinner />}
+        {!loading && calMode && effDay && (
+          <div style={{ padding: '14px 16px 4px', fontSize: 12, fontWeight: 800, color: C.sage, letterSpacing: 1, textTransform: 'uppercase' }}>{fmtDate(effDay)}</div>
+        )}
+        {!loading && calMode && dayList.length === 0 && <div style={{ textAlign: 'center', color: '#bbb', padding: 48, fontSize: 14 }}>No classes on this day</div>}
+        {!loading && !calMode && filtered.length === 0 && <div style={{ textAlign: 'center', color: '#bbb', padding: 48, fontSize: 14 }}>No upcoming sessions</div>}
+        {!loading && featured && <SessionCard key={featured.id} session={featured} onClick={onBookSession} client={client} featured />}
+        {!loading && rest.map(s => <SessionCard key={s.id} session={s} onClick={onBookSession} client={client} />)}
+      </div>
+
+      {studio && (
+        <div style={{ ...base.card, margin: '14px 14px 0', cursor: 'default' }}>
+          <div style={{ padding: '14px 16px 4px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name='map-pin' size={16} color={C.olive} />
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: C.dark }}>{studio.location}</div>
+              <div style={{ fontSize: 12, color: C.light }}>{studio.address}</div>
+            </div>
+          </div>
+          <MapView lat={studio.lat} lng={studio.lng} label={studio.location} address={studio.address} />
+        </div>
+      )}
+
+      <div onClick={onOpenPrivate} style={{ ...base.card, margin: '14px 14px 20px', background: `linear-gradient(135deg, ${C.olive}, ${C.dark})`, cursor: 'pointer' }}>
+        <div style={{ padding: '20px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: '#b5d18a', fontSize: 11, fontWeight: 800, letterSpacing: 1.5, marginBottom: 6 }}>1-ON-1 SESSION</div>
+            <div style={{ color: C.white, fontSize: 17, fontWeight: 700, marginBottom: 4 }}>Private Lagree at your home</div>
+            <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13 }}>Personalized · $80 USD · your location →</div>
+          </div>
+          <Icon name='sparkle' size={36} color='rgba(255,255,255,0.5)' />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// PRIVATE SESSION
+// ─────────────────────────────────────────────
+function PrivatePage({ onDone }) {
+  const saved = loadClient();
+  const [form, setForm]     = useState({ name: saved?.name||'', email: saved?.email||'', mobile: saved?.mobile||'', date: '', time: '', address: '', notes: '' });
+  const [submitted, setSub] = useState(false);
+  const [loading, setLoad]  = useState(false);
+  const [error, setError]   = useState(null);
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const valid = sanitize(form.name).length >= 2 && isValidEmail(form.email) && isValidMobile(form.mobile) && form.date && sanitize(form.address).length >= 5;
+
+  const submit = async () => {
+    if (!valid) return;
+    setLoad(true); setError(null);
+    const { error } = await DB.submitBooking({
+      client_name:    form.name.trim(),
+      client_email:   form.email.trim().toLowerCase(),
+      client_mobile:  form.mobile.trim(),
+      session_id:     null,
+      session_title:  'Private 1-on-1 Session',
+      session_date:   form.date || null,
+      session_time:   form.time || null,
+      session_type:   'private',
+      preferred_date: form.date || null,
+      preferred_time: form.time || null,
+      private_address: form.address.trim(),
+      private_notes:  form.notes.trim(),
+    });
+    setLoad(false);
+    if (error) { setError('Something went wrong. Please try again.'); return; }
+    setSub(true);
+  };
+
+  if (submitted) return (
+    <div style={{ ...base.screen, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 28px' }}>
+      <div style={{ width: 90, height: 90, borderRadius: '50%', background: C.mist, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 24 }}><Icon name='sparkle' size={40} color={C.olive} /></div>
+      <div style={{ fontSize: 24, fontWeight: 300, color: C.olive, letterSpacing: 2, marginBottom: 12, textAlign: 'center' }}>Request Sent!</div>
+      <div style={{ fontSize: 14, color: C.light, textAlign: 'center', lineHeight: 1.7, marginBottom: 30 }}>Lea will review your request and reach out to confirm all the details.</div>
+      <button style={base.btn} onClick={onDone}>Back to Schedule</button>
+    </div>
+  );
+
+  return (
+    <div style={base.screen}>
+      <div style={base.header}>
+        <div style={{ color: '#b5d18a', fontSize: 11, letterSpacing: 2, marginBottom: 4 }}>LEA ROSSEK</div>
+        <div style={{ color: C.white, fontSize: 24, fontWeight: 200, letterSpacing: 2 }}>Private Session</div>
+        <div style={{ color: 'rgba(255,255,255,0.65)', fontSize: 13, marginTop: 2 }}>1-on-1 · at your residence</div>
+      </div>
+
+      <div style={{ ...base.card, margin: '14px 14px 0' }}>
+        <div style={{ padding: '16px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 11, color: C.sage, fontWeight: 800, letterSpacing: 1.5, marginBottom: 4 }}>SESSION RATE</div>
+            <div style={{ fontSize: 32, fontWeight: 800, color: C.olive, lineHeight: 1 }}>$80 <span style={{fontSize:14,fontWeight:400,color:'#aaa'}}>USD</span></div>
+            <div style={{ fontSize: 12, color: '#aaa', marginTop: 4 }}>per session · USD · cash on arrival</div>
+          </div>
+          <Icon name='sparkle' size={44} color={C.mist} />
+        </div>
+      </div>
+
+      <div style={{ margin: '10px 14px 0', padding: '0 2px' }}>
+        {['50-minute personalized Lagree session', 'Lea comes to your home or private space', 'Tailored to your fitness level & goals', 'Earns rewards points toward your tier'].map((item, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 8, fontSize: 13, color: '#444' }}>
+            <Icon name='check' size={14} color={C.sage} weight='bold' />{item}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ margin: '14px 14px 0', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div><label style={base.label}>Full Name</label><input style={base.input} placeholder="Your full name" maxLength={80} value={form.name} onChange={set('name')} /></div>
+        <div><label style={base.label}>Email</label><input style={base.input} type="email" placeholder="your@email.com" maxLength={120} autoComplete="email" value={form.email} onChange={set('email')} /></div>
+        <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" placeholder="+961 xx xxx xxx" maxLength={20} autoComplete="tel" value={form.mobile} onChange={set('mobile')} /></div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div><label style={base.label}>Preferred Date</label><input style={base.input} type="date" value={form.date} onChange={set('date')} /></div>
+          <div><label style={base.label}>Preferred Time</label><input style={base.input} type="time" value={form.time} onChange={set('time')} /></div>
+        </div>
+        <div><label style={base.label}>Your Address / Location</label><input style={base.input} placeholder="Full address for the session" maxLength={200} value={form.address} onChange={set('address')} /></div>
+        <div><label style={base.label}>Notes (optional)</label><textarea style={{ ...base.input, minHeight: 76, resize: 'none' }} placeholder="Any goals, injuries, or requests…" maxLength={500} value={form.notes} onChange={set('notes')} /></div>
+        {error && <div style={{ color: '#e74c3c', fontSize: 13, textAlign: 'center' }}>{error}</div>}
+        <button style={{ ...base.btn, opacity: valid ? 1 : 0.45 }} onClick={submit} disabled={!valid || loading}>
+          {loading ? 'Sending Request…' : 'Request Private Session'}
+        </button>
+        <div style={{ fontSize: 11, color: '#bbb', textAlign: 'center', lineHeight: 1.5, paddingBottom: 10 }}>Lea will confirm availability and reach out directly.</div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// MY CLASSES — the logged-in client's bookings
+// ─────────────────────────────────────────────
+function MyBookingsPage({ client, onOpenAccount, onBrowse }) {
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [busy, setBusy]         = useState(null);
+
+  const load = useCallback(() => {
+    if (!client?.email) { setLoading(false); return; }
+    setLoading(true);
+    DB.getBookingsByEmail(client.email).then(({ data }) => { setBookings(data || []); setLoading(false); });
+  }, [client?.email]);
+  useEffect(() => { load(); }, [load]);
+
+  const cancel = async (b) => {
+    setBusy(b.id);
+    await DB.cancelBooking(b.id);
+    setBusy(null);
+    load();
+  };
+
+  const todayStr = new Date().toISOString().split('T')[0];
+  const active = bookings.filter(b => b.status !== 'cancelled');
+  const upcoming = active.filter(b => !b.session_date || b.session_date >= todayStr);
+  const past     = active.filter(b => b.session_date && b.session_date < todayStr);
+  const cancelled = bookings.filter(b => b.status === 'cancelled');
+
+  const STATUS = {
+    pending:   { label: 'Pending',   color: '#d4820a', bg: '#fff4e0', ph: 'hourglass-medium' },
+    confirmed: { label: 'Confirmed', color: '#5a7032', bg: '#e8f3d6', ph: 'check-circle' },
+    cancelled: { label: 'Cancelled', color: '#999',    bg: '#f0f0f0', ph: 'x-circle' },
+  };
+
+  const Row = ({ b, canCancel }) => {
+    const st = STATUS[b.status] || STATUS.pending;
+    const tc = TYPE.color[b.session_type] || C.sage;
+    return (
+      <div style={{ ...base.card, margin: '0 0 10px' }}>
+        <div style={{ height: 4, background: tc }} />
+        <div style={{ padding: '13px 16px 14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: C.text, lineHeight: 1.15 }}>{b.session_title}</div>
+              <div style={{ fontSize: 12, color: C.light, marginTop: 3 }}>{TYPE.label[b.session_type] || b.session_type}</div>
+            </div>
+            <span style={{ background: st.bg, color: st.color, fontSize: 11, fontWeight: 800, padding: '4px 10px', borderRadius: 20, display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+              <Icon name={st.ph} size={12} color={st.color} />{st.label}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', fontSize: 12, color: C.light }}>
+            {b.session_date && <span><Icon name='calendar' size={13} style={{marginRight:4}} />{fmtDate(b.session_date)}</span>}
+            {b.session_time && <span><Icon name='clock' size={13} style={{marginRight:4}} />{b.session_time}</span>}
+            {b.priority && <span style={{ color: '#b3902f', fontWeight: 700 }}><Icon name='crown-simple' size={13} style={{marginRight:4}} color='#b3902f' />Priority</span>}
+          </div>
+          {canCancel && (
+            <button onClick={() => cancel(b)} disabled={busy === b.id} style={{ marginTop: 12, background: 'none', border: `1.5px solid #e7c4c4`, color: '#c0392b', borderRadius: 10, padding: '8px 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'Nunito' }}>
+              {busy === b.id ? 'Cancelling…' : 'Cancel booking'}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={base.screen}>
+      <div style={base.header}>
+        <div style={{ color: '#b5d18a', fontSize: 11, letterSpacing: 2, marginBottom: 4 }}>LEA ROSSEK</div>
+        <div style={{ color: C.white, fontSize: 24, fontWeight: 200, letterSpacing: 2 }}>My Classes</div>
+      </div>
+
+      {!client ? (
+        <div style={{ padding: '16px 14px' }}>
+          <div style={{ ...base.card, margin: 0, padding: '26px 20px', textAlign: 'center' }}>
+            <Icon name='calendar-check' size={34} color={C.sage} />
+            <div style={{ fontSize: 16, fontWeight: 800, color: C.dark, margin: '12px 0 6px' }}>Sign in to see your classes</div>
+            <div style={{ fontSize: 13, color: C.light, marginBottom: 18, lineHeight: 1.5 }}>Your booked and past sessions show up here once you're signed in.</div>
+            <button style={base.btn} onClick={onOpenAccount}>Sign in / Join</button>
+          </div>
+        </div>
+      ) : loading ? <Spinner /> : (
+        <div style={{ padding: '16px 14px' }}>
+          {active.length === 0 && cancelled.length === 0 && (
+            <div style={{ ...base.card, margin: 0, padding: '26px 20px', textAlign: 'center' }}>
+              <Icon name='calendar-blank' size={34} color='#ccc' />
+              <div style={{ fontSize: 15, fontWeight: 700, color: '#555', margin: '12px 0 6px' }}>No bookings yet</div>
+              <div style={{ fontSize: 13, color: C.light, marginBottom: 18 }}>Book a class to see it here.</div>
+              <button style={base.btn} onClick={onBrowse}>Browse the schedule</button>
+            </div>
+          )}
+          {upcoming.length > 0 && <div style={{ fontSize: 11, fontWeight: 800, color: C.sage, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 10 }}>Upcoming</div>}
+          {upcoming.map(b => <Row key={b.id} b={b} canCancel />)}
+          {past.length > 0 && <div style={{ fontSize: 11, fontWeight: 800, color: '#bbb', letterSpacing: 1.5, textTransform: 'uppercase', margin: '14px 0 10px' }}>Past</div>}
+          {past.map(b => <Row key={b.id} b={b} />)}
+          {cancelled.length > 0 && <div style={{ fontSize: 11, fontWeight: 800, color: '#bbb', letterSpacing: 1.5, textTransform: 'uppercase', margin: '14px 0 10px' }}>Cancelled</div>}
+          {cancelled.map(b => <Row key={b.id} b={b} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// ACCOUNT — identity, preferences, logout
+// ─────────────────────────────────────────────
+function AccountPage({ client, setClient, onLogout, onJoin }) {
+  const tier = client ? getTier(client.sessions_count || 0) : null;
+  const [name, setName]     = useState(client?.name || '');
+  const [mobile, setMobile] = useState(client?.mobile || '');
+  const prefs0 = client?.preferences || {};
+  const [times, setTimes]   = useState(prefs0.times || []);
+  const [notify, setNotify] = useState(prefs0.notify !== false);
+  const [saved, setSaved]   = useState(false);
+  const [busy, setBusy]     = useState(false);
+
+  if (!client) return (
+    <div style={base.screen}>
+      <div style={base.header}>
+        <div style={{ color: '#b5d18a', fontSize: 11, letterSpacing: 2, marginBottom: 4 }}>LEA ROSSEK</div>
+        <div style={{ color: C.white, fontSize: 24, fontWeight: 200, letterSpacing: 2 }}>Account</div>
+      </div>
+      <div style={{ padding: '16px 14px' }}>
+        <div style={{ ...base.card, margin: 0, padding: '26px 20px', textAlign: 'center' }}>
+          <Icon name='user-circle' size={36} color={C.sage} />
+          <div style={{ fontSize: 16, fontWeight: 800, color: C.dark, margin: '12px 0 6px' }}>You're not signed in</div>
+          <div style={{ fontSize: 13, color: C.light, marginBottom: 18, lineHeight: 1.5 }}>Join to save your details, track rewards, and book in one tap.</div>
+          <button style={base.btn} onClick={onJoin}>Join / Sign in</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const toggleTime = (t) => setTimes(ts => ts.includes(t) ? ts.filter(x => x !== t) : [...ts, t]);
+  const save = async () => {
+    setBusy(true);
+    const preferences = { times, notify };
+    const updated = { ...client, name: name.trim() || client.name, mobile: mobile.trim() || client.mobile, preferences };
+    await DB.updateClient(client.email, { name: updated.name, mobile: updated.mobile, preferences });
+    setClient(updated);
+    setBusy(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2200);
+  };
+
+  return (
+    <div style={base.screen}>
+      <div style={base.header}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <Avatar client={client} size={52} />
+          <div>
+            <div style={{ color: C.white, fontSize: 22, fontWeight: 300, letterSpacing: 1 }}>{client.name}</div>
+            <div style={{ marginTop: 6 }}><TierBadge tier={tier} /></div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: '16px 14px' }}>
+        <div style={{ ...base.card, margin: '0 0 12px', padding: '16px 16px' }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.sage, letterSpacing: 1.5, marginBottom: 14 }}>YOUR DETAILS</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div><label style={base.label}>Full Name</label><input style={base.input} value={name} onChange={e => setName(e.target.value)} /></div>
+            <div><label style={base.label}>Mobile</label><input style={base.input} type="tel" value={mobile} onChange={e => setMobile(e.target.value)} /></div>
+            <div>
+              <label style={base.label}>Email</label>
+              <div style={{ ...base.input, background: '#f0f0ec', color: '#888', display: 'flex', alignItems: 'center', gap: 6 }}><Icon name='lock-simple' size={14} color='#aaa' />{client.email}</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ ...base.card, margin: '0 0 12px', padding: '16px 16px' }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.sage, letterSpacing: 1.5, marginBottom: 12 }}>PREFERENCES</div>
+          <label style={base.label}>Preferred class times</label>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+            {['Morning', 'Afternoon', 'Evening'].map(t => (
+              <button key={t} onClick={() => toggleTime(t)} style={{ background: times.includes(t) ? C.olive : C.cream, color: times.includes(t) ? C.white : C.dark, border: `1.5px solid ${times.includes(t) ? C.olive : C.border}`, borderRadius: 20, padding: '8px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'Nunito' }}>{t}</button>
+            ))}
+          </div>
+          <div onClick={() => setNotify(n => !n)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+            <div style={{ fontSize: 14, color: '#333', fontWeight: 600 }}>Notify me about new classes</div>
+            <div style={{ width: 46, height: 27, borderRadius: 20, background: notify ? C.olive : '#ccc', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}>
+              <div style={{ position: 'absolute', top: 3, left: notify ? 22 : 3, width: 21, height: 21, borderRadius: '50%', background: C.white, transition: 'left 0.2s' }} />
+            </div>
+          </div>
+        </div>
+
+        {saved && <div style={{ textAlign: 'center', color: C.olive, fontSize: 13, fontWeight: 700, marginBottom: 10 }}><Icon name='check' size={14} weight='bold' style={{marginRight:4}} />Saved</div>}
+        <button style={base.btn} onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button>
+        <button style={{ ...base.btnOut, marginTop: 10, borderColor: '#e0c4c4', color: '#c0392b' }} onClick={onLogout}><Icon name='sign-out' size={15} style={{marginRight:6}} />Sign out</button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// PROFILE / REWARDS
+// ─────────────────────────────────────────────
+function ProfilePage({ client, onOpenAccount }) {
+  const [email, setEmail]     = useState('');
+  const [profile, setProfile] = useState(null);
+  const [notFound, setNF]     = useState(false);
+  const [loading, setLoad]    = useState(false);
+
+  const loadFor = async (e) => {
+    setLoad(true); setNF(false);
+    const { data } = await DB.getClientByEmail(e);
+    setLoad(false);
+    if (data && data.length > 0) {
+      const c = data[0];
+      setProfile({ ...c, tier: getTier(c.sessions_count) });
+    } else if (client && e === client.email) {
+      // Logged in but no server record yet (e.g. brand-new) — show from local
+      setProfile({ ...client, sessions_count: client.sessions_count || 0, tier: getTier(client.sessions_count || 0) });
+    } else {
+      setNF(true);
+    }
+  };
+
+  // Auto-load the logged-in client's rewards — no email prompt
+  useEffect(() => { if (client?.email) loadFor(client.email); }, [client?.email]);
+
+  const lookup = () => { if (email.includes('@')) loadFor(email); };
+
+  const nextTier = profile ? TIERS.find(t => t.min > profile.sessions_count) : null;
+  const pct = profile ? (() => {
+    const t = profile.tier;
+    const max = t.max === Infinity ? profile.sessions_count + 5 : t.max;
+    return Math.min(100, Math.round(((profile.sessions_count - t.min) / (max - t.min + 1)) * 100));
+  })() : 0;
+
+  return (
+    <div style={base.screen}>
+      <div style={base.header}>
+        <div style={{ color: '#b5d18a', fontSize: 11, letterSpacing: 2, marginBottom: 4 }}>LEA ROSSEK</div>
+        <div style={{ color: C.white, fontSize: 24, fontWeight: 200, letterSpacing: 2 }}>My Rewards</div>
+      </div>
+
+      {!profile ? (
+        <div style={{ padding: '16px 14px' }}>
+          {!client && (
+            <div style={{ ...base.card, margin: '0 0 16px', padding: '22px 18px', textAlign: 'center', background: `linear-gradient(135deg, ${C.olive}, ${C.dark})` }}>
+              <Icon name='star' size={30} color='#f3e6b8' weight='bold' />
+              <div style={{ fontSize: 17, fontWeight: 800, color: C.white, margin: '10px 0 6px' }}>Sign in to see your rewards</div>
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.8)', marginBottom: 16, lineHeight: 1.5 }}>Track your tier, discounts and priority perks automatically.</div>
+              <button style={{ ...base.btn, background: C.white, color: C.olive }} onClick={onOpenAccount}>Sign in / Join</button>
+            </div>
+          )}
+          <div style={{ ...base.card, margin: '0 0 16px', padding: '20px 18px' }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: C.dark, marginBottom: 6 }}>Look up by email</div>
+            <div style={{ fontSize: 13, color: C.light, marginBottom: 18, lineHeight: 1.5 }}>Already booked before? Enter that email to see your tier.</div>
+            <label style={base.label}>Email Address</label>
+            <input style={{ ...base.input, marginBottom: 12 }} type="email" placeholder="your@email.com" value={email} onChange={e => { setEmail(e.target.value); setNF(false); }} onKeyDown={e => e.key === 'Enter' && lookup()} />
+            {notFound && <div style={{ fontSize: 12, color: '#e74c3c', marginBottom: 10 }}>No profile found. Book a session to get started!</div>}
+            <button style={{ ...base.btn, opacity: email.includes('@') ? 1 : 0.45 }} onClick={lookup} disabled={!email.includes('@') || loading}>
+              {loading ? 'Looking up…' : 'Find My Profile'}
+            </button>
+            {DEMO_MODE && <div style={{ fontSize: 11, color: '#bbb', textAlign: 'center', marginTop: 10 }}>Demo: try sarah@email.com · lara@email.com</div>}
+          </div>
+
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.sage, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 10 }}>Membership Tiers</div>
+          {TIERS.map(t => (
+            <div key={t.name} style={{ ...base.card, margin: '0 0 8px', padding: '14px 16px', display: 'flex', gap: 14, alignItems: 'center' }}>
+              <Icon name={t.ph} size={22} color={t.color} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 800, fontSize: 15, color: t.color }}>{t.name}</div>
+                <div style={{ fontSize: 12, color: C.light, marginBottom: 2 }}>{t.max === Infinity ? `${t.min}+ sessions` : `${t.min}–${t.max} sessions`}</div>
+                <div style={{ fontSize: 12, color: '#555' }}>{t.perk}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ padding: '16px 14px' }}>
+          <div style={{ background: profile.tier.bg, border: `2px solid ${profile.tier.color}25`, borderRadius: 18, padding: '20px 18px', marginBottom: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+              <div>
+                <div style={{ fontSize: 13, color: '#999' }}>Welcome back,</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: C.text }}>{profile.name}</div>
+              </div>
+              <div style={{ background: profile.tier.color, color: C.white, borderRadius: 10, padding: '5px 14px', fontSize: 14, fontWeight: 800, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <Icon name={profile.tier.ph} size={16} style={{marginRight:4}} />{profile.tier.name}
+              </div>
+            </div>
+            <div style={{ display: 'flex', marginBottom: 16 }}>
+              {[{ val: profile.sessions_count, label: 'Sessions' }, { val: profile.tier.discount + '%', label: 'Discount' }, { val: profile.tier.priority ? <Icon name='check' size={20} color={profile.tier.color} weight='bold' /> : '–', label: 'Priority' }].map((s, i) => (
+                <div key={i} style={{ flex: 1, textAlign: 'center', borderRight: i < 2 ? `1px solid ${profile.tier.color}30` : 'none' }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: profile.tier.color, lineHeight: 1.1 }}>{s.val}</div>
+                  <div style={{ fontSize: 10, color: '#888', fontWeight: 700, letterSpacing: 1, marginTop: 3 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+            {nextTier && (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#888', marginBottom: 6 }}>
+                  <span>{profile.tier.name}</span>
+                  <span><strong style={{ color: profile.tier.color }}>{nextTier.min - profile.sessions_count}</strong> sessions to {nextTier.name} {nextTier.icon}</span>
+                </div>
+                <div style={{ background: `${profile.tier.color}25`, borderRadius: 20, height: 7, overflow: 'hidden' }}>
+                  <div style={{ background: profile.tier.color, height: '100%', width: `${pct}%`, borderRadius: 20, transition: 'width 0.8s cubic-bezier(.4,0,.2,1)' }} />
+                </div>
+              </>
+            )}
+            {!nextTier && <div style={{ textAlign: 'center', fontSize: 14, color: profile.tier.color, fontWeight: 700 }}><Icon name='trophy' size={14} style={{marginRight:4}} color={profile.tier.color} />Highest tier achieved!</div>}
+          </div>
+
+          <div style={{ ...base.card, margin: '0 0 10px', padding: '16px 16px' }}>
+            <div style={{ fontSize: 11, color: C.sage, fontWeight: 800, letterSpacing: 1.5, marginBottom: 12 }}>YOUR PERKS</div>
+            {profile.tier.perks.map((p, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, paddingBottom: i < profile.tier.perks.length - 1 ? 10 : 0, fontSize: 14, color: '#333' }}>
+                <Icon name='check-circle' size={18} color={profile.tier.color} weight='bold' />{p}
+              </div>
+            ))}
+          </div>
+
+          {profile.tier.rebate > 0 && (
+            <div style={{ ...base.card, margin: '0 0 10px', padding: '16px 16px', display: 'flex', gap: 12, alignItems: 'center' }}>
+              <div style={{ width: 46, height: 46, borderRadius: 12, background: profile.tier.color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Icon name='gift' size={24} color={profile.tier.color} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: C.sage, fontWeight: 800, letterSpacing: 1.5, marginBottom: 3 }}>REBATED PACKAGES</div>
+                <div style={{ fontSize: 13, color: '#444', lineHeight: 1.45 }}>Buy a class package and get <strong style={{ color: profile.tier.color }}>{profile.tier.rebate}% rebated</strong> as credit toward your next pack.</div>
+              </div>
+            </div>
+          )}
+
+          {onOpenAccount && client && profile.email === client.email && (
+            <button style={base.btnOut} onClick={onOpenAccount}><Icon name='gear' size={15} style={{marginRight:6}} />Manage account & preferences</button>
+          )}
+          {(!client || profile.email !== client?.email) && (
+            <button style={base.btnOut} onClick={() => { setProfile(null); setEmail(''); }}>← Back</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// ADMIN — ADD / EDIT SESSION MODAL
+// ─────────────────────────────────────────────
+function SessionModal({ session, onSave, onClose }) {
+  const blank = { type: 'studio', title: '', date: '', time: '', duration: 50, location: '', address: '', lat: '', lng: '', capacity: 2, price: '', external_link: '', coupon: '' };
+  const [form, setForm] = useState(session ? { ...session, price: String(session.price), capacity: session.capacity || '' } : blank);
+  const [saving, setSave] = useState(false);
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const valid = form.title && form.date && form.time && form.location && form.price;
+
+  const save = async () => {
+    setSave(true);
+    const data = {
+      type: form.type, title: form.title.trim(), date: form.date, time: form.time,
+      duration: parseInt(form.duration) || 50, location: form.location.trim(),
+      address: form.address.trim() || null,
+      capacity: form.type === 'studio' ? (parseInt(form.capacity) || 2) : null,
+      price: parseFloat(form.price),
+      external_link: form.type === 'guest' ? (form.external_link.trim() || null) : null,
+      coupon: form.type === 'guest' ? (form.coupon.trim() || null) : null,
+      lat: form.lat !== '' && form.lat !== undefined ? parseFloat(form.lat) || null : null,
+      lng: form.lng !== '' && form.lng !== undefined ? parseFloat(form.lng) || null : null,
+    };
+    await onSave(session ? session.id : null, data);
+    setSave(false);
+    onClose();
+  };
+
+  const overlay = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 300, display: 'flex', alignItems: 'flex-end' };
+  const modal = { background: C.white, borderRadius: '20px 20px 0 0', padding: '20px 18px', width: '100%', maxHeight: '85vh', overflowY: 'auto' };
+
+  return (
+    <div style={overlay} onClick={onClose}>
+      <div style={modal} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+          <div style={{ fontWeight: 800, fontSize: 17, color: C.dark }}>{session ? 'Edit Session' : 'New Session'}</div>
+          <button onClick={onClose} style={{ background: '#f0f0f0', border: 'none', borderRadius: '50%', width: 30, height: 30, cursor: 'pointer', fontSize: 16 }}>×</button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <label style={base.label}>Type</label>
+            <select style={{ ...base.input }} value={form.type} onChange={set('type')}>
+              <option value="studio">Private Studio (Miziara)</option>
+              <option value="guest">Guest Class at Partner Studio</option>
+            </select>
+          </div>
+          <div><label style={base.label}>Title</label><input style={base.input} placeholder="e.g. Morning Lagree" value={form.title} onChange={set('title')} /></div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div><label style={base.label}>Date</label><input style={base.input} type="date" value={form.date} onChange={set('date')} /></div>
+            <div><label style={base.label}>Time</label><input style={base.input} type="time" value={form.time} onChange={set('time')} /></div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div><label style={base.label}>Duration (min)</label><input style={base.input} type="number" value={form.duration} onChange={set('duration')} /></div>
+            <div><label style={base.label}>Price (USD)</label><input style={base.input} type="number" placeholder="35" value={form.price} onChange={set('price')} /></div>
+          </div>
+          <div><label style={base.label}>Studio / Location Name</label><input style={base.input} placeholder="e.g. Flex Studio Beirut" value={form.location} onChange={set('location')} /></div>
+          <div><label style={base.label}>Address</label><input style={base.input} placeholder="e.g. Mar Mikhael, Beirut" value={form.address} onChange={set('address')} /></div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div><label style={base.label}>Latitude (optional)</label><input style={base.input} placeholder="e.g. 34.283" value={form.lat} onChange={set('lat')} /></div>
+            <div><label style={base.label}>Longitude (optional)</label><input style={base.input} placeholder="e.g. 35.683" value={form.lng} onChange={set('lng')} /></div>
+          </div>
+          {form.type === 'studio' && (
+            <div><label style={base.label}>Capacity (machines)</label><input style={base.input} type="number" min="1" max="10" value={form.capacity} onChange={set('capacity')} /></div>
+          )}
+          {form.type === 'guest' && (<>
+            <div><label style={base.label}>Booking Link (external)</label><input style={base.input} type="url" placeholder="https://studio.com/book" value={form.external_link} onChange={set('external_link')} /></div>
+            <div><label style={base.label}>Coupon Code (optional)</label><input style={base.input} placeholder="e.g. LEAROSSEK10" value={form.coupon} onChange={set('coupon')} /></div>
+          </>)}
+          <button style={{ ...base.btn, opacity: valid ? 1 : 0.45, marginTop: 4 }} onClick={save} disabled={!valid || saving}>
+            {saving ? 'Saving…' : session ? 'Save Changes' : 'Add Session'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// ADMIN PANEL
+// ─────────────────────────────────────────────
+function AdminPanel({ onExit }) {
+  const [authed, setAuthed]     = useState(false);
+  const [pw, setPw]             = useState('');
+  const [pwError, setPwErr]     = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [tab, setTab]           = useState('bookings');
+  const [confirmDialog, setConfirmDialog] = useState(null); // { message, onConfirm }
+
+  // Data
+  const [bookings, setBookings] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [clients, setClients]   = useState([]);
+  const [prices, setPrices]     = useState({ studio: 35, private: 80 });
+  const [loading, setLoading]   = useState(false);
+  const [editPrice, setEP]      = useState(null);
+  const [modal, setModal]       = useState(null); // null | 'new' | session obj
+  const [opError, setOpError]   = useState(null); // error from admin operations
+
+  // All admin calls go through /api/admin — password validated server-side
+  const api = useCallback((action, payload = {}) => adminFetch(action, payload, pw), [pw]);
+
+  // Server-side password validation — pw never compared in browser JS
+  const tryLogin = async () => {
+    if (!pw.trim()) { setPwErr(true); return; }
+    setLoginLoading(true);
+    try {
+      await api('ping');
+      setAuthed(true); setPwErr(false);
+      loadAll();
+    } catch {
+      setPwErr(true);
+    }
+    setLoginLoading(false);
+  };
+
+  const loadAll = async () => {
+    setLoading(true); setOpError(null);
+    try {
+      const [b, s, c, p] = await Promise.all([
+        api('getAllBookings'),
+        api('getAllSessions'),
+        api('getAllClients'),
+        DB.getPrices(),          // prices are public read, no admin needed
+      ]);
+      setBookings(b.data || []);
+      setSessions(s.data || []);
+      setClients(c.data || []);
+      setPrices(p.data || { studio: 35, private: 80 });
+    } catch (e) {
+      setOpError('Failed to load data: ' + e.message);
+    }
+    setLoading(false);
+  };
+
+  const confirmBooking = async (id) => {
+    try {
+      await api('confirmBooking', { id });
+      setBookings(bs => bs.map(b => b.id === id ? { ...b, status: 'confirmed' } : b));
+    } catch (e) { setOpError('Confirm failed: ' + e.message); }
+  };
+
+  const cancelBooking = async (id) => {
+    try {
+      await api('cancelBooking', { id });
+      // Show as cancelled in the list rather than removing it
+      setBookings(bs => bs.map(b => b.id === id ? { ...b, status: 'cancelled' } : b));
+    } catch (e) { setOpError('Cancel failed: ' + e.message); }
+  };
+
+  const savePrice = async (key, amount) => {
+    try {
+      await api('updatePrice', { key, amount: parseFloat(amount) });
+      setEP(null);
+    } catch (e) { setOpError('Price update failed: ' + e.message); }
+  };
+
+  const saveSession = async (id, data) => {
+    try {
+      if (id) {
+        await api('updateSession', { id, data });
+        setSessions(ss => ss.map(s => s.id === id ? { ...s, ...data } : s));
+      } else {
+        const res = await api('addSession', data);
+        if (res.data && res.data[0]) setSessions(ss => [...ss, res.data[0]]);
+      }
+    } catch (e) { setOpError('Session save failed: ' + e.message); }
+  };
+
+  const deleteSession = (id) => {
+    setConfirmDialog({
+      message: 'Remove this session from the schedule?',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        try {
+          await api('deleteSession', { id });
+          setSessions(ss => ss.filter(s => s.id !== id));
+        } catch (e) { setOpError('Delete failed: ' + e.message); }
+      },
+    });
+  };
+
+  // CSV export with proper escaping to prevent injection
+  const exportCSV = () => {
+    const csvEscape = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+    const rows = [['Name', 'Email', 'Mobile', 'Sessions', 'Tier']];
+    clients.forEach(c => {
+      const t = getTier(c.sessions_count);
+      rows.push([c.name, c.email, c.mobile, c.sessions_count, t.name]);
+    });
+    const csv = rows.map(r => r.map(csvEscape).join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+    a.download = 'learossek-clients.csv';
+    a.click();
+  };
+
+  if (!authed) return (
+    <div style={{ ...base.screen, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 32px' }}>
+      <Logo size={60} />
+      <div style={{ fontSize: 11, color: C.sage, fontWeight: 800, letterSpacing: 2, margin: '18px 0 6px', textTransform: 'uppercase' }}>Admin Access</div>
+      <div style={{ fontSize: 22, fontWeight: 200, color: C.olive, letterSpacing: 2, marginBottom: 32 }}>lea rossek</div>
+      <div style={{ width: '100%', marginBottom: 12 }}>
+        <label style={base.label}>Password</label>
+        <input style={{ ...base.input, ...(pwError ? { borderColor: '#e74c3c' } : {}) }} type="password" placeholder="Enter admin password" value={pw} onChange={e => { setPw(e.target.value); setPwErr(false); }} onKeyDown={e => e.key === 'Enter' && tryLogin()} />
+        {pwError && <div style={{ color: '#e74c3c', fontSize: 12, marginTop: 6 }}>Incorrect password</div>}
+      </div>
+      <button style={{ ...base.btn, opacity: loginLoading ? 0.6 : 1 }} onClick={tryLogin} disabled={loginLoading}>{loginLoading ? 'Checking…' : 'Enter'}</button>
+      <button onClick={onExit} style={{ background: 'none', border: 'none', color: '#bbb', marginTop: 18, cursor: 'pointer', fontSize: 13, fontFamily: 'Nunito' }}>← Back to app</button>
+    </div>
+  );
+
+  const tabs = [
+    { id: 'bookings', label: 'Bookings', count: bookings.filter(b => b.status === 'pending').length },
+    { id: 'sessions', label: 'Sessions', count: null },
+    { id: 'prices',   label: 'Prices',   count: null },
+    { id: 'clients',  label: 'Clients',  count: clients.length },
+  ];
+
+  return (
+    <div style={{ ...base.screen, background: '#f4f8f0' }}>
+      <div style={{ background: C.dark, padding: '16px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Logo size={32} />
+          <span style={{ color: C.white, fontSize: 15, fontWeight: 300, letterSpacing: 2 }}>Admin Panel</span>
+          {DEMO_MODE && <span style={{ background: 'rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.8)', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 6 }}>DEMO</span>}
+        </div>
+        <button onClick={onExit} style={{ background: 'rgba(255,255,255,0.12)', border: 'none', color: C.white, borderRadius: 8, padding: '6px 12px', cursor: 'pointer', display:'flex', alignItems:'center', gap:4 }}><Icon name="sign-out" size={14} color={C.white} /><span style={{fontSize:12,fontWeight:700,fontFamily:'Nunito'}}>Exit</span></button>
+      </div>
+
+      <div style={{ background: C.white, borderBottom: `1px solid ${C.border}`, display: 'flex', overflowX: 'auto' }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{ flex: '0 0 auto', padding: '12px 14px 10px', fontSize: 12, fontWeight: 800, border: 'none', cursor: 'pointer', fontFamily: 'Nunito', background: tab === t.id ? C.cream : C.white, color: tab === t.id ? C.olive : '#aaa', borderBottom: `2.5px solid ${tab === t.id ? C.olive : 'transparent'}`, display: 'flex', alignItems: 'center', gap: 5 }}>
+            {t.label}
+            {t.count > 0 && <span style={{ background: tab === t.id ? C.olive : '#ddd', color: tab === t.id ? C.white : '#888', borderRadius: 10, padding: '1px 6px', fontSize: 10, fontWeight: 800 }}>{t.count}</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* Operation error banner */}
+      {opError && (
+        <div style={{ background: '#fdeaea', borderBottom: '1px solid #f5c6c6', padding: '10px 16px', fontSize: 13, color: '#c0392b', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span><Icon name='warning' size={14} style={{marginRight:6}} />{opError}</span>
+          <button onClick={() => setOpError(null)} style={{ background: 'none', border: 'none', color: '#c0392b', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 4px' }}>×</button>
+        </div>
+      )}
+
+      {/* Custom confirm dialog (replaces window.confirm — blocked in Instagram WebView) */}
+      {confirmDialog && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 32px' }}>
+          <div style={{ background: '#fff', borderRadius: 18, padding: '24px 22px', width: '100%', maxWidth: 320 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: C.dark, marginBottom: 20, textAlign: 'center', lineHeight: 1.5 }}>{confirmDialog.message}</div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setConfirmDialog(null)} style={{ flex: 1, background: C.cream, border: `1px solid ${C.border}`, color: C.dark, borderRadius: 10, padding: '12px', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'Nunito' }}>Cancel</button>
+              <button onClick={confirmDialog.onConfirm} style={{ flex: 1, background: '#fdeaea', border: 'none', color: '#c0392b', borderRadius: 10, padding: '12px', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'Nunito' }}>Remove</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading && <Spinner />}
+
+      {/* BOOKINGS */}
+      {!loading && tab === 'bookings' && (
+        <div style={{ padding: '10px 0' }}>
+          {bookings.length === 0 && <div style={{ textAlign: 'center', color: '#bbb', padding: 40, fontSize: 14 }}>No bookings yet</div>}
+          {bookings.map(b => (
+            <div key={b.id} style={{ background: C.white, margin: '8px 14px', borderRadius: 14, padding: '14px 16px', boxShadow: '0 1px 8px rgba(90,112,50,0.05)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontWeight: 800, fontSize: 15 }}>{b.client_name}</span>
+                <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 10, background: b.status === 'confirmed' ? '#ddedc8' : '#fff3cd', color: b.status === 'confirmed' ? C.dark : '#856404' }}>{b.status.toUpperCase()}</span>
+              </div>
+              <div style={{ fontSize: 12, color: C.light, lineHeight: 1.9 }}>
+                <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='envelope' size={12} />{b.client_email}</div>
+                <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='device-mobile' size={12} />{b.client_mobile}</div>
+                <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='calendar' size={12} />{b.session_title} · {b.session_date ? fmtDate(b.session_date) : 'TBD'}</div>
+                <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='tag' size={12} />{TYPE.label[b.session_type]}</div>
+                {b.private_address && <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='map-pin' size={12} />{b.private_address}</div>}
+                {b.private_notes && <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='note' size={12} />{b.private_notes}</div>}
+              </div>
+              {b.status === 'pending' && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  <button onClick={() => confirmBooking(b.id)} style={{ flex: 1, background: '#ddedc8', color: C.dark, border: 'none', borderRadius: 9, padding: '10px', fontSize: 13, fontWeight: 800, cursor: 'pointer', fontFamily: 'Nunito' }}>Confirm</button>
+                  <button onClick={() => cancelBooking(b.id)} style={{ flex: 1, background: '#fdeaea', color: '#c0392b', border: 'none', borderRadius: 9, padding: '10px', fontSize: 13, fontWeight: 800, cursor: 'pointer', fontFamily: 'Nunito' }}>Cancel</button>
+                </div>
+              )}
+              {b.status === 'confirmed' && (
+                <div style={{ marginTop: 10, background: C.cream, borderRadius: 8, padding: '8px 12px', fontSize: 12, color: C.sage, fontWeight: 700 }}><Icon name='star' size={12} style={{marginRight:4}} />Points awarded after session</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* SESSIONS */}
+      {!loading && tab === 'sessions' && (
+        <div style={{ padding: '12px 14px' }}>
+          <button style={{ ...base.btn, marginBottom: 14 }} onClick={() => setModal('new')}><Icon name='plus' size={14} style={{marginRight:5}} />Add New Session</button>
+          {sessions.map(s => (
+            <div key={s.id} style={{ background: C.white, borderRadius: 14, padding: '14px 16px', marginBottom: 10, boxShadow: '0 1px 8px rgba(90,112,50,0.05)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                <span style={{ background: TYPE.color[s.type] + '18', color: TYPE.color[s.type], fontSize: 10, fontWeight: 800, letterSpacing: 1, padding: '4px 10px', borderRadius: 20, textTransform: 'uppercase' }}>{TYPE.label[s.type]}</span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={() => setModal(s)} style={{ background: C.cream, border: `1px solid ${C.border}`, color: C.olive, borderRadius: 7, padding: '5px 12px', fontSize: 11, fontWeight: 800, cursor: 'pointer', fontFamily: 'Nunito' }}><Icon name='pencil-simple' size={11} style={{marginRight:3}} />Edit</button>
+                  <button onClick={() => deleteSession(s.id)} style={{ background: '#fdeaea', border: 'none', color: '#c0392b', borderRadius: 7, padding: '5px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', fontFamily: 'Nunito' }}><Icon name='trash' size={11} style={{marginRight:3}} />Del</button>
+                </div>
+              </div>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>{s.title}</div>
+              <div style={{ fontSize: 12, color: C.light, lineHeight: 1.8 }}>
+                <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='calendar' size={12} />{fmtDate(s.date)} · {s.time} · {s.duration}min</div>
+                <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='map-pin' size={12} />{s.location}</div>
+                <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='currency-dollar' size={12} />{s.price} USD</div>
+                {s.capacity != null && <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='users' size={12} />{s.booked_count}/{s.capacity} booked</div>}
+                {s.coupon && <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='ticket' size={12} />Coupon: <strong style={{ color: C.olive }}>{s.coupon}</strong></div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* PRICES */}
+      {!loading && tab === 'prices' && (
+        <div style={{ padding: '16px 14px' }}>
+          <div style={{ fontSize: 13, color: '#555', lineHeight: 1.6, marginBottom: 16 }}>Base prices shown to clients. Tier discounts apply automatically.</div>
+          {[
+            { key: 'studio',  label: 'Studio Session — Miziara', ph: 'house', desc: '2 machines · max 2 clients · 50 min' },
+            { key: 'private', label: 'Private 1-on-1 Session',    ph: 'sparkle', desc: 'At client residence · 50 min' },
+          ].map(item => (
+            <div key={item.key} style={{ background: C.white, borderRadius: 14, padding: '16px 18px', marginBottom: 12, boxShadow: '0 1px 8px rgba(90,112,50,0.05)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ flex: 1, paddingRight: 12 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14, display:'flex', alignItems:'center', gap:6 }}><Icon name={item.ph} size={16} color={C.sage} />{item.label}</div>
+                  <div style={{ fontSize: 12, color: '#aaa', marginTop: 3 }}>{item.desc}</div>
+                </div>
+                {editPrice === item.key ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontWeight: 800, fontSize: 16, color: C.olive }}>$</span>
+                    <input type="number" style={{ width: 68, border: `2px solid ${C.olive}`, borderRadius: 8, padding: '7px 8px', fontSize: 17, fontWeight: 800, color: C.olive, textAlign: 'center', fontFamily: 'Nunito', outline: 'none', background: C.cream }} value={prices[item.key]} onChange={e => setPrices(p => ({ ...p, [item.key]: e.target.value }))} />
+                    <button onClick={() => savePrice(item.key, prices[item.key])} style={{ background: C.olive, color: C.white, border: 'none', borderRadius: 8, padding: '7px 12px', cursor: 'pointer', fontWeight: 800, fontFamily: 'Nunito' }}><Icon name='check' size={16} color={C.white} weight='bold' /></button>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: 26, fontWeight: 800, color: C.olive }}>${prices[item.key]}</span>
+                    <button onClick={() => setEP(item.key)} style={{ background: C.cream, border: `1px solid ${C.border}`, color: C.olive, borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', fontFamily: 'Nunito' }}><Icon name='pencil-simple' size={11} style={{marginRight:3}} />Edit</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+          <div style={{ background: C.white, borderRadius: 14, padding: '16px 18px', boxShadow: '0 1px 8px rgba(90,112,50,0.05)' }}>
+            <div style={{ fontSize: 11, color: C.sage, fontWeight: 800, letterSpacing: 1.5, marginBottom: 12 }}>TIER DISCOUNTS (auto-applied)</div>
+            {TIERS.map(t => (
+              <div key={t.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>{t.icon}</span>
+                  <span style={{ fontWeight: 700, color: t.color }}>{t.name}</span>
+                  <span style={{ fontSize: 12, color: C.light }}>{t.max === Infinity ? `${t.min}+ sessions` : `${t.min}–${t.max} sessions`}</span>
+                </div>
+                <span style={{ fontWeight: 800, color: t.discount > 0 ? C.olive : '#aaa' }}>{t.discount > 0 ? `−${t.discount}%` : 'No discount'}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 12, color: '#bbb', marginTop: 12, lineHeight: 1.5 }}>Guest studio prices are set per-event in the Sessions tab.</div>
+        </div>
+      )}
+
+      {/* CLIENTS */}
+      {!loading && tab === 'clients' && (
+        <div style={{ padding: '12px 14px' }}>
+          <button style={{ ...base.btnMist, marginBottom: 14 }} onClick={exportCSV}>Export Client List (CSV)</button>
+          {clients.sort((a, b) => b.sessions_count - a.sessions_count).map((c, i) => {
+            const tier = getTier(c.sessions_count);
+            return (
+              <div key={i} style={{ background: C.white, borderRadius: 14, padding: '14px 16px', marginBottom: 10, boxShadow: '0 1px 8px rgba(90,112,50,0.05)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontWeight: 800, fontSize: 15 }}>{c.name}</span>
+                  <span style={{ background: tier.bg, color: tier.color, fontSize: 12, fontWeight: 800, padding: '3px 10px', borderRadius: 10 }}><Icon name={tier.ph} size={14} style={{marginRight:3}} />{tier.name}</span>
+                </div>
+                <div style={{ fontSize: 12, color: C.light, lineHeight: 1.8 }}>
+                  <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='envelope' size={12} />{c.email}</div>
+                  <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='device-mobile' size={12} />{c.mobile}</div>
+                  <div style={{display:'flex',alignItems:'center',gap:5}}><Icon name='barbell' size={12} />{c.sessions_count} sessions</div>
+                  {tier.discount > 0 && <div style={{ color: C.sage, fontWeight: 700, display:'flex', alignItems:'center', gap:4 }}><Icon name='check-circle' size={12} />{tier.discount}% discount active</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Session modal */}
+      {modal && <SessionModal session={modal === 'new' ? null : modal} onSave={saveSession} onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// APP ROOT
+// ─────────────────────────────────────────────
+function App() {
+  const [page, setPage]       = useState('home');
+  const [booking, setBooking] = useState(null);
+  const [admin, setAdmin]     = useState(false);
+  const [client, setClientState] = useState(() => loadClient());
+  const tapCount              = useRef(0);
+  const tapTimer              = useRef(null);
+
+  // Single source of truth for the logged-in client (also persists to storage)
+  const setClient = useCallback((c) => {
+    if (c) { saveClient(c); setClientState(c); }
+    else   { clearClient(); setClientState(null); }
+  }, []);
+
+  // Keep tier/sessions fresh from the server when we have a client
+  useEffect(() => {
+    if (!client?.email) return;
+    DB.getClientByEmail(client.email).then(({ data }) => {
+      if (data && data.length) {
+        const s = data[0];
+        setClientState(prev => {
+          const merged = { ...prev, ...s };
+          saveClient(merged);
+          return merged;
+        });
+      }
+    });
+  }, [client?.email]);
+
+  const tapLogo = () => {
+    tapCount.current++;
+    clearTimeout(tapTimer.current);
+    tapTimer.current = setTimeout(() => { tapCount.current = 0; }, 2000);
+    if (tapCount.current >= 5) { tapCount.current = 0; setAdmin(true); }
+  };
+
+  const goAccount = () => setPage(client ? 'account' : 'register');
+
+  if (admin)   return <AdminPanel onExit={() => setAdmin(false)} />;
+  if (booking) return <BookingForm session={booking} client={client} setClient={setClient} onBack={() => setBooking(null)} onDone={() => { setBooking(null); setPage(client ? 'bookings' : 'home'); }} />;
+
+  return (
+    <>
+      {page === 'home'     && <HomePage onBookSession={setBooking} onOpenPrivate={() => setPage('private')} tapLogo={tapLogo} openAdmin={() => setAdmin(true)} client={client} onOpenAccount={goAccount} />}
+      {page === 'bookings' && <MyBookingsPage client={client} onOpenAccount={goAccount} onBrowse={() => setPage('home')} />}
+      {page === 'private'  && <PrivatePage onDone={() => setPage('home')} />}
+      {page === 'profile'  && <ProfilePage client={client} onOpenAccount={goAccount} />}
+      {page === 'account'  && <AccountPage client={client} setClient={setClient} onLogout={() => { setClient(null); setPage('home'); }} onJoin={() => setPage('register')} />}
+      {page === 'register' && <RegisterPage onDone={() => setPage('home')} setClient={setClient} />}
+      <NavBar page={page} setPage={setPage} client={client} />
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
